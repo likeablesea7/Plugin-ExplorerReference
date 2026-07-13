@@ -1,0 +1,312 @@
+Overhauled PartsMenu:
+SideMenu--------------------
+
+
+nothing here yet
+
+
+--------------------
+
+
+SideMenu-------------------- 
+
+
+StarterGui
+
+> SideMenu (ScreenGui)
+_> C (Frame)
+__> PartsMenu-LocalScript (LocalScript)
+
+__> C_MenuTabs (Frame)
+___> Tab_PartsMenu (TextButton)
+____> Icon (ImageLabel)
+
+__> C_PartsMenu (Frame)
+___> C_PartsTabs (Frame)
+
+____> Tab_Structural (TextButton)
+_____> Icon (ImageLabel)
+
+____> Tab_Mechanical (TextButton)
+_____> Icon (ImageLabel)
+
+___> C_Structural (Frame)
+____> C_PartsList (ScrollingFrame)
+_____> C_BasicGroup (Frame)
+______> button_Ball (TextButton)
+______> button_Block (TextButton)
+______> button_Cylinder (TextButton)
+______> button_Wedge (TextButton)
+_____> C_MeshesGroup (Frame)
+______> button_Frustum (TextButton)
+______> button_Spike (TextButton)
+______> button_UV HalfSphere (TextButton)
+______> button_UV Sphere (TextButton)
+
+___> C_Mechanical (Frame)
+____> C_PartsList (ScrollingFrame)
+_____> C_ControlGroup (Frame)
+______> button_VehicleSeat (TextButton)
+_____> C_PowerGroup (Frame)
+______> button_Motor (TextButton)
+______> button_Motor2 (TextButton)
+_____> C_ForceGroup (Frame)
+______> button_Spring (TextButton)
+_____> C_ConstrainGroup (Frame)
+______> button_Rod (TextButton)
+______> button_Rod2 (TextButton)
+
+
+--------------------
+
+
+BottomBar--------------------
+
+
+StarterGui
+
+> BottomBar (ScreenGui)
+_> C (Frame)
+
+__> C_DeleteMenu (Frame)
+___> DeleteMenu-LocalScript (LocalScript)
+___> button_Delete (TextButton)
+
+__> C_DuplicateMenu (Frame)
+___> DuplicateMenu-LocalScript (LocalScript)
+___> button_Duplicate (TextButton)
+
+__> C_G/LMenu (Frame)
+___> G/LMenu-LocalScript (LocalScript)
+___> Orientation_Global (TextButton)
+___> Orientation_Local (TextButton)
+
+__> C_GizmoMenu (Frame)
+___> GizmoMenu-LocalScript (LocalScript)
+___> Gizmo_Move (TextButton)
+___> Gizmo_Rotate (TextButton)
+___> Gizmo_Scale (TextButton)
+
+__> C_GridMenu (Frame)
+___> GridMenu-LocalScript (LocalScript)
+___> Grid_Move (TextBox)
+___> Grid_Rotate (TextBox)
+
+__> C_UndoMenu (Frame)
+___> UndoMenu-LocalScript (LocalScript)
+___> button_Redo (TextButton)
+___> button_Undo (TextButton)
+
+
+PropertiesMenu--------------------
+
+
+StarterGui
+
+> PropertiesMenu (ScreenGui)
+_> PropertiesMenu-LocalScript (LocalScript)
+_> C (Frame)
+__> C (Frame)
+
+___> C_Properties_Base (Frame)
+
+____> C_Anchored (Frame)
+_____> Boolean_False (TextButton)
+_____> Boolean_True (TextButton)
+
+____> C_Color (Frame)
+_____> C (Frame)
+______> Button_ColorPicker (TextButton)
+_______> DisplayColor (Frame)
+______> Value_Color (TextBox)
+
+____> C_Material (Frame)
+_____> Button_MaterialPicker (TextButton)
+______> Label_Material (TextLabel)
+______> C_MaterialPicker (Frame)
+_______> Button_Concrete (TextButton)
+_______> Button_Grass (TextButton)
+_______> Button_Metal (TextButton)
+_______> Button_Plastic (TextButton)
+
+___> C_Properties_Motor (Frame)
+
+____> C_AngularVelocity (Frame)
+_____> Value_Number (TextBox)
+
+____> C_Acceleration (Frame)
+_____> Value_Number (TextBox)
+
+____> C_Torque (Frame)
+_____> Value_Number (TextBox)
+
+____> C_ResetAngle (Frame)
+_____> Value_Number (TextBox)
+
+____> C_Keybinds (Frame)
+_____> C_ForwardContainer (Frame)
+______> C_Forward (Frame)
+_______> Value_Keybind (TextBox)
+______> C_Or (Frame)
+_______> Value_Keybind (TextBox)
+_____> C_BackwardContainer (Frame)
+______> C_Backward (Frame)
+_______> Value_Keybind (TextBox)
+______> C_Or (Frame)
+_______> Value_Keybind (TextBox)
+
+____> C_MotorLock (Frame)
+_____> Boolean_False (TextButton)
+_____> Boolean_True (TextButton)
+
+____> C_FollowCursor (Frame)
+_____> Boolean_False (TextButton)
+_____> Boolean_True (TextButton)
+
+____> C_Inverted (Frame)
+_____> Boolean_False (TextButton)
+_____> Boolean_True (TextButton)
+
+____> C_Powered (Frame)
+_____> Boolean_False (TextButton)
+_____> Boolean_True (TextButton)
+
+____> C_StopAction (Frame)
+_____> Button_StopActionPicker (TextButton)
+______> Label_StopAction (TextLabel)
+______> C_StopActionPicker (Frame)
+_______> Button_HoldAngle (TextButton)
+_______> Button_LockAngle (TextButton)
+_______> Button_None (TextButton)
+_______> Button_HoldTorque (TextButton)
+_______> Button_ResetAngle (TextButton)
+
+____> C_Limits (Frame)
+_____> C_LimitsContainer (Frame)
+______> C_Max (Frame)
+_______> Value_Number (TextBox)
+______> C_Min (Frame)
+_______> Value_Number (TextBox)
+_____> C_LimitsEnabled (Frame)
+______> Boolean_False (TextButton)
+______> Boolean_True (TextButton)
+
+____> C_ToggleMode (Frame)
+_____> Button_ToggleModePicker (TextButton)
+______> Label_ToggleMode (TextLabel)
+______> C_ToggleModePicker (Frame)
+_______> Button_Normal (TextButton)
+_______> Button_Binary (TextButton)
+_______> Button_Step (TextButton)
+_______> Button_Cycle (TextButton)
+_______> Button_None (TextButton)
+
+____> C_StartToggled (Frame)
+_____> Boolean_False (TextButton)
+_____> Boolean_True (TextButton)
+
+___> C_Properties_Spring (Frame)
+____> C_FreeLength (Frame)
+_____> Value_Number (TextBox)
+____> C_Stiffness (Frame)
+_____> Value_Number (TextBox)
+____> C_Damping (Frame)
+_____> Value_Number (TextBox)
+
+___> C_Tabs (Frame)
+____> Tab_Base (TextButton)
+____> Tab_Motor (TextButton)
+____> Tab_Spring (TextButton)
+
+__> C_Copy (Frame)
+___> Button_Copy (TextButton)
+
+
+ColorPickerMenu--------------------
+
+
+StarterGui
+
+> ColorPickerMenu (ScreenGui)
+_> ColorPickerMenu-LocalScript (LocalScript)
+_> C (Frame)
+__> ColorPicker (Frame)
+___> DisplayColor (Frame)
+___> DarknessStrip (ImageButton)
+____> DarknessSlider (Frame)
+____> DarknessGradient (UIGradient)
+___> RGBStrip (ImageButton)
+____> RGBSlider (Frame)
+____> RGBGradient (UIGradient)
+___> SaturationStrip (ImageButton)
+____> SaturationSlider (Frame)
+____> SaturationGradient (UIGradient)
+__> Button_Pick (TextButton)
+
+
+DragSnappingMenu--------------------
+
+
+StarterGui
+
+> DragSnappingMenu (ScreenGui)
+_> DragSnappingMenu-LocalScript (LocalScript)
+_> C (Frame)
+__> C_RibCount (Frame)
+___> Value_Number (TextBox)
+__> C_SnapRadius (Frame)
+___> Value_Number (TextBox)
+__> Button_DragSnapping (TextButton)
+
+
+ActionHelperMenu--------------------
+
+
+StarterGui
+
+> ActionHelperMenu
+_> ActionHelperMenu-LocalScript (LocalScript)
+_> C (Frame)
+__> Label_SelectPartToCopyFrom (TextLabel)
+__> Label_SelectSurfaceToCopyColor (TextLabel)
+
+
+ReplicatedStorage--------------------
+
+
+ReplicatedStorage
+
+> Model_Parts (Folder)
+
+_> Motor (Model)
+__> HingeConstraint
+__> Block 1x1.75x1 (Part)
+___> A.2 (Attachment) (Offset: -Y , 0)
+___> Cylinder .25x.25x.25 (Part) (Offset: -X , 0)
+____> WeldConstraint
+__> Block 2x.25x2 (Part)
+___> A.1 (Attachment) (Offset: Y , 0)
+__> Weld (Weld)
+__> LockAngle (Weld)
+
+_> Motor2 (Model)
+__> HingeConstraint
+__> Block 1x.25x1 (Part)
+___> A.2 (Attachment) (Offset: -Y , .25)
+___> Cylinder .001x.25x.25 (Part) (Offset: -X , 0)
+____> WeldConstraint
+__> Block 1x.25x1 (Part)
+___> A.1 (Attachment) (Offset: Y , 0)
+__> Weld (Weld)
+__> LockAngle (Weld)
+
+
+StarterPlayer--------------------
+
+
+StarterPlayer
+
+> StarterPlayerScripts
+_> UIController (LocalScript)
+
+
