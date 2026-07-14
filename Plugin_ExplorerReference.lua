@@ -4,14 +4,23 @@ end
 
 local Selection = game:GetService("Selection")
 local HttpService = game:GetService("HttpService")
+local TextService = game:GetService("TextService")
 
 --============================================================
 -- Config / Theme
 --============================================================
 
 local INDENT = "  " -- 2 spaces per depth level
+local INDENT_LEN = #INDENT
+local NODE_TEXT_SIZE = 14
 local DATA_KEY_BASE = "ExplorerReference_Data_v2" -- suffixed with GameId per experience
 local DIFF_COLOR = "#FF6B6B" -- red for the appended detail
+
+-- Monospace char width of the node font, used to align Mark guide lines.
+local CHAR_WIDTH = 8
+pcall(function()
+	CHAR_WIDTH = TextService:GetTextSize("0000000000", NODE_TEXT_SIZE, Enum.Font.Code, Vector2.new(1e4, 1e4)).X / 10
+end)
 
 local THEME = {
 	bg       = Color3.fromRGB(30, 30, 30),
@@ -25,7 +34,13 @@ local THEME = {
 	rowSel   = Color3.fromRGB(38, 79, 120),
 	rowHover = Color3.fromRGB(45, 45, 48),
 	border   = Color3.fromRGB(60, 60, 62),
+	guide    = Color3.fromRGB(66, 66, 70), -- Mark vertical guide lines
 }
+
+-- Horizontal offset (px, within a row) for a guide line at a given child depth.
+local function guideX(depth)
+	return math.floor(CHAR_WIDTH * (INDENT_LEN * (depth - 1) + 1))
+end
 
 -- Curated class-name abbreviations. Anything not here keeps its full name.
 -- Values are unique so the generated key is unambiguous.
@@ -73,7 +88,7 @@ local CLASS_COLOR = {
 -- State
 --============================================================
 
--- group: { name, entries = { {inst, order, detail, padded}... }, byInst = {[Instance]=entry}, counter }
+-- group: { name, entries = { {inst, order, detail, padded, marked}... }, byInst = {[Instance]=entry}, counter }
 local groups = {}
 local activeIndex = 1
 local selectedInst = nil
@@ -82,7 +97,7 @@ local abbrevMode = false
 
 -- forward declarations
 local refreshAll, refreshView, refreshTabs, refreshNameBox, save
-local paintMulti, paintAbbrev, paintOverwrite, paintPad
+local paintMulti, paintAbbrev, paintOverwrite, paintPad, paintMark
 local applyLayout
 
 --============================================================
@@ -286,6 +301,39 @@ local function buildItems(group)
 		if idx > 1 and not root.padded then table.insert(items, { kind = "blank" }) end
 		dfs(root, 0)
 	end
+
+	-- Mark: for each marked parent, tag the rows spanning its direct children
+	-- with a guide-line depth (drawn as a vertical line in createRow).
+	for pIdx, it in ipairs(items) do
+		local e = it.inst and group.byInst[it.inst]
+		if e and e.marked and it.depth ~= nil then
+			local d = it.depth
+			local childDepth = d + 1
+			local endIdx = #items
+			for j = pIdx + 1, #items do
+				local jt = items[j]
+				if jt.inst and jt.depth ~= nil and jt.depth <= d then
+					endIdx = j - 1
+					break
+				end
+			end
+			local firstIdx, lastIdx
+			for k = pIdx + 1, endIdx do
+				local kt = items[k]
+				if kt.inst and kt.depth == childDepth then
+					firstIdx = firstIdx or k
+					lastIdx = k
+				end
+			end
+			if firstIdx and lastIdx then
+				for k = firstIdx, lastIdx do
+					items[k].guides = items[k].guides or {}
+					table.insert(items[k].guides, childDepth)
+				end
+			end
+		end
+	end
+
 	return items
 end
 
@@ -439,7 +487,7 @@ save = function()
 		for _, e in ipairs(g.entries) do
 			local path = pathOf(e.inst)
 			if path then
-				table.insert(gg.nodes, { path = path, order = e.order, detail = e.detail, padded = e.padded })
+				table.insert(gg.nodes, { path = path, order = e.order, detail = e.detail, padded = e.padded, marked = e.marked })
 			end
 		end
 		table.insert(data.groups, gg)
@@ -474,7 +522,7 @@ local function load()
 		for _, nd in ipairs(nodes) do
 			local inst = nd.path and resolvePath(nd.path)
 			if inst and not g.byInst[inst] then
-				local e = { inst = inst, order = nd.order or g.counter, detail = nd.detail, padded = nd.padded }
+				local e = { inst = inst, order = nd.order or g.counter, detail = nd.detail, padded = nd.padded, marked = nd.marked }
 				table.insert(g.entries, e)
 				g.byInst[inst] = e
 				g.counter = math.max(g.counter, (nd.order or 0) + 1)
@@ -891,12 +939,27 @@ local function setSelected(inst)
 	end
 	if paintOverwrite then paintOverwrite() end
 	if paintPad then paintPad() end
+	if paintMark then paintMark() end
 end
 
 local function clearBody()
 	bodyRows = {}
 	for _, child in ipairs(body:GetChildren()) do
 		if child:IsA("GuiObject") then child:Destroy() end
+	end
+end
+
+-- Draw Mark guide lines (thin full-height vertical segments) inside a row.
+local function addGuides(rowObj, guides)
+	if not guides then return end
+	for _, depth in ipairs(guides) do
+		local line = Instance.new("Frame")
+		line.BackgroundColor3 = THEME.guide
+		line.BorderSizePixel = 0
+		line.Size = UDim2.new(0, 1, 1, 0)
+		line.Position = UDim2.new(0, guideX(depth), 0, 0)
+		line.ZIndex = 0
+		line.Parent = rowObj
 	end
 end
 
@@ -907,6 +970,7 @@ local function createRow(item, order)
 		spacer.Size = UDim2.new(1, 0, 0, 8)
 		spacer.LayoutOrder = order
 		spacer.Parent = body
+		addGuides(spacer, item.guides)
 		return
 	end
 
@@ -967,6 +1031,7 @@ local function createRow(item, order)
 	end
 
 	btn.Parent = body
+	addGuides(btn, item.guides)
 	table.insert(bodyRows, { inst = item.inst, button = btn })
 end
 
@@ -1197,6 +1262,26 @@ do
 		refreshView()
 	end)
 	paintPad = paint
+end
+
+do
+	local _, paint = makeToggle(actionRow, "Mark", function()
+		local g = activeGroup()
+		local e = selectedInst and g and entryFor(g, selectedInst)
+		return e ~= nil and e.marked == true
+	end, function()
+		local g = activeGroup()
+		if not g or not selectedInst then
+			warn("[ExplorerReference] Click a parent node in the list first, then press Mark.")
+			return
+		end
+		local e = entryFor(g, selectedInst)
+		if not e then return end
+		e.marked = not e.marked
+		save()
+		refreshView()
+	end)
+	paintMark = paint
 end
 
 do
