@@ -34,7 +34,7 @@ local THEME = {
 	rowSel   = Color3.fromRGB(38, 79, 120),
 	rowHover = Color3.fromRGB(45, 45, 48),
 	border   = Color3.fromRGB(60, 60, 62),
-	guide    = Color3.fromRGB(66, 66, 70), -- Mark vertical guide lines
+	guide    = Color3.fromRGB(82, 82, 92), -- Mark vertical guide lines
 }
 
 -- Horizontal offset (px, within a row) for a guide line at a given child depth.
@@ -954,11 +954,15 @@ local function addGuides(rowObj, guides)
 	if not guides then return end
 	for _, depth in ipairs(guides) do
 		local line = Instance.new("Frame")
+		line.Name = "Guide"
 		line.BackgroundColor3 = THEME.guide
 		line.BorderSizePixel = 0
-		line.Size = UDim2.new(0, 1, 1, 0)
+		line.Size = UDim2.new(0, 2, 1, 0)
 		line.Position = UDim2.new(0, guideX(depth), 0, 0)
-		line.ZIndex = 0
+		-- Above the opaque row/body background (ZIndex 1) so it stays visible in
+		-- both Global and Sibling ZIndexBehavior; it sits in the indent gap, so
+		-- rendering over the text layer never overlaps any glyphs.
+		line.ZIndex = 3
 		line.Parent = rowObj
 	end
 end
