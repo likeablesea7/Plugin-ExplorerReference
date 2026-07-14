@@ -5,6 +5,7 @@ end
 local Selection = game:GetService("Selection")
 local HttpService = game:GetService("HttpService")
 local TextService = game:GetService("TextService")
+local UserInputService = game:GetService("UserInputService")
 
 --============================================================
 -- Config / Theme
@@ -32,9 +33,10 @@ local THEME = {
 	header   = Color3.fromRGB(96, 160, 255),
 	service  = Color3.fromRGB(120, 200, 140),
 	rowSel   = Color3.fromRGB(38, 79, 120),
+	rowLatest = Color3.fromRGB(52, 104, 156), -- brighter: the primary (latest) selected node
 	rowHover = Color3.fromRGB(45, 45, 48),
 	border   = Color3.fromRGB(60, 60, 62),
-	guide    = Color3.fromRGB(82, 82, 92), -- Mark vertical guide lines
+	guide    = Color3.fromRGB(50, 50, 56), -- Mark vertical guide lines
 }
 
 -- Horizontal offset (px, within a row) for a guide line at a given child depth.
@@ -72,16 +74,17 @@ local CLASS_ABBREV = {
 	SpecialMesh = "SM", BlockMesh = "BM", CylinderMesh = "CM",
 }
 
--- Per-ClassName text color for node names. Anything not listed uses THEME.text.
+-- Per-ClassName color (hex, for RichText) applied to only the (ClassName) part
+-- of a node's label. Anything not listed keeps the default text color.
 local CLASS_COLOR = {
-	ScrollingFrame = Color3.fromRGB(150, 225, 160), -- light green
-	TextButton     = Color3.fromRGB(120, 200, 140), -- green
-	ImageButton    = Color3.fromRGB(120, 200, 140), -- green
-	Frame          = Color3.fromRGB(235, 165, 95),  -- orange
-	LocalScript    = Color3.fromRGB(130, 200, 240), -- light blue
-	TextLabel      = Color3.fromRGB(100, 150, 245), -- blue
-	ImageLabel     = Color3.fromRGB(100, 150, 245), -- blue
-	ScreenGui      = Color3.fromRGB(100, 150, 245), -- blue
+	ScrollingFrame = "#8FE6A8", -- light green
+	TextButton     = "#45C46A", -- green
+	ImageButton    = "#45C46A", -- green
+	Frame          = "#F0913C", -- orange
+	LocalScript    = "#86D9FF", -- light blue
+	TextLabel      = "#6496F5", -- blue
+	ImageLabel     = "#6496F5", -- blue
+	ScreenGui      = "#6496F5", -- blue
 }
 
 --============================================================
@@ -91,13 +94,25 @@ local CLASS_COLOR = {
 -- group: { name, entries = { {inst, order, detail, padded, marked}... }, byInst = {[Instance]=entry}, counter }
 local groups = {}
 local activeIndex = 1
-local selectedInst = nil
 local multiSelect = false
 local abbrevMode = false
+
+-- Multi-selection within the plugin (mirrors Studio's Explorer selection).
+local selection = {} -- ordered list of selected Instances
+local selectionSet = {} -- [Instance] = true
+local latestInst = nil -- most recently clicked selected node (single-target actions use this)
+local anchorInst = nil -- range-select (Shift) anchor
+local applyingSelection = false -- guard against Studio<->plugin selection feedback loops
+
+-- Undo / redo (snapshots of group state)
+local undoStack = {}
+local redoStack = {}
+local UNDO_LIMIT = 100
 
 -- forward declarations
 local refreshAll, refreshView, refreshTabs, refreshNameBox, save
 local paintMulti, paintAbbrev, paintOverwrite, paintPad, paintMark
+local applyHighlight, syncSelectionToStudio, pushUndo
 local applyLayout
 
 --============================================================
@@ -144,21 +159,8 @@ local function defaultLabelFull(inst)
 	return safeName(inst) .. " (" .. safeClass(inst) .. ")"
 end
 
--- The label shown when NOT overwritten, honoring abbreviation mode.
-local function displayLabel(inst)
-	if isService(inst) then
-		return safeName(inst)
-	end
-	local cn = safeClass(inst)
-	local shown = cn
-	if abbrevMode and CLASS_ABBREV[cn] then
-		shown = CLASS_ABBREV[cn]
-	end
-	return safeName(inst) .. " (" .. shown .. ")"
-end
-
 --============================================================
--- RichText helpers (for the appended "detail" on a node)
+-- RichText / label helpers
 --============================================================
 
 local function escapeRich(s: string): string
@@ -168,9 +170,23 @@ local function escapeRich(s: string): string
 	return s
 end
 
--- RichText for "base detail": the base label plain, the appended detail red.
-local function detailRich(base: string, detail: string): string
-	return escapeRich(base) .. " " .. '<font color="' .. DIFF_COLOR .. '">' .. escapeRich(detail) .. "</font>"
+-- Build a node's base label in plain and RichText forms (honoring abbrev mode).
+-- Rich form keeps the Name in the default color and colors only the (ClassName).
+-- Returns: plain, rich, isNode (false for services).
+local function nodeLabels(inst)
+	local nameStr = safeName(inst)
+	if isService(inst) then
+		return nameStr, escapeRich(nameStr), false
+	end
+	local cn = safeClass(inst)
+	local shown = (abbrevMode and CLASS_ABBREV[cn]) or cn
+	local plain = nameStr .. " (" .. shown .. ")"
+	local classTxt = "(" .. escapeRich(shown) .. ")"
+	local hex = CLASS_COLOR[cn]
+	if hex then
+		classTxt = '<font color="' .. hex .. '">' .. classTxt .. "</font>"
+	end
+	return plain, escapeRich(nameStr) .. " " .. classTxt, true
 end
 
 --============================================================
@@ -186,7 +202,7 @@ local function entryFor(group, inst)
 end
 
 local function addInstanceChain(group, inst)
-	if not isValid(inst) or inst == game then return end
+	if not isValid(inst) or inst == game then return 0 end
 	local chain = {}
 	local n = inst
 	while n and n ~= game do
@@ -194,14 +210,17 @@ local function addInstanceChain(group, inst)
 		if safeParent(n) == game then break end
 		n = safeParent(n)
 	end
+	local added = 0
 	for _, node in ipairs(chain) do
 		if not group.byInst[node] then
 			local e = { inst = node, order = group.counter, detail = nil }
 			group.counter += 1
 			table.insert(group.entries, e)
 			group.byInst[node] = e
+			added += 1
 		end
 	end
+	return added
 end
 
 local function pruneStale(group)
@@ -254,14 +273,18 @@ local function buildItems(group)
 		local prefix = string.rep(INDENT, depth)
 		local svc = isService(inst)
 		local copyText, displayText, rich
-		local base = displayLabel(inst) -- abbreviates when abbrev mode is on
+		local plainBase, richBase, isNode = nodeLabels(inst)
 
 		if entry.detail and entry.detail ~= "" then
-			copyText = prefix .. base .. " " .. entry.detail
-			displayText = prefix .. detailRich(base, entry.detail)
+			copyText = prefix .. plainBase .. " " .. entry.detail
+			displayText = prefix .. richBase .. " " .. '<font color="' .. DIFF_COLOR .. '">' .. escapeRich(entry.detail) .. "</font>"
+			rich = true
+		elseif isNode then
+			copyText = prefix .. plainBase
+			displayText = prefix .. richBase
 			rich = true
 		else
-			copyText = prefix .. base
+			copyText = prefix .. plainBase
 			displayText = copyText
 			rich = false
 		end
@@ -497,6 +520,63 @@ save = function()
 	end)
 end
 
+--============================================================
+-- Undo / redo (snapshots of group state, preserving live Instance refs)
+--============================================================
+
+local function cloneGroups(src)
+	local out = {}
+	for _, g in ipairs(src) do
+		local ng = { name = g.name, counter = g.counter, entries = {}, byInst = {} }
+		for _, e in ipairs(g.entries) do
+			local ne = { inst = e.inst, order = e.order, detail = e.detail, padded = e.padded, marked = e.marked }
+			table.insert(ng.entries, ne)
+			ng.byInst[e.inst] = ne
+		end
+		table.insert(out, ng)
+	end
+	return out
+end
+
+local function snapshotState()
+	return { groups = cloneGroups(groups), active = activeIndex }
+end
+
+local function restoreState(snap)
+	groups = cloneGroups(snap.groups)
+	activeIndex = math.clamp(snap.active or 1, 1, math.max(1, #groups))
+	selection = {}
+	selectionSet = {}
+	latestInst = nil
+	anchorInst = nil
+end
+
+local function commitUndo(snap)
+	table.insert(undoStack, snap)
+	if #undoStack > UNDO_LIMIT then table.remove(undoStack, 1) end
+	redoStack = {}
+end
+
+pushUndo = function()
+	commitUndo(snapshotState())
+end
+
+local function undo()
+	if #undoStack == 0 then return end
+	table.insert(redoStack, snapshotState())
+	restoreState(table.remove(undoStack))
+	save()
+	refreshAll()
+end
+
+local function redo()
+	if #redoStack == 0 then return end
+	table.insert(undoStack, snapshotState())
+	restoreState(table.remove(redoStack))
+	save()
+	refreshAll()
+end
+
 local function newGroup(silent)
 	local g = { name = "Group " .. (#groups + 1), entries = {}, byInst = {}, counter = 0 }
 	table.insert(groups, g)
@@ -657,13 +737,14 @@ end
 --============================================================
 
 local actionRow = makeStrip(content, 4, 28)
-local tabRow = makeStrip(content, 36, 28)
+local actionRow2 = makeStrip(content, 34, 28)
+local tabRow = makeStrip(content, 64, 28)
 
 -- Group-name row: editable name box (rename) + Del Group
 local nameRow = Instance.new("Frame")
 nameRow.BackgroundColor3 = THEME.bar
 nameRow.BorderSizePixel = 0
-nameRow.Position = UDim2.new(0, 0, 0, 68)
+nameRow.Position = UDim2.new(0, 0, 0, 94)
 nameRow.Size = UDim2.new(1, 0, 0, 24)
 nameRow.Parent = content
 
@@ -713,8 +794,8 @@ delGroupBtn.MouseLeave:Connect(function() delGroupBtn.BackgroundColor3 = THEME.b
 local body = Instance.new("ScrollingFrame")
 body.BackgroundColor3 = THEME.bg
 body.BorderSizePixel = 0
-body.Position = UDim2.new(0, 0, 0, 96)
-body.Size = UDim2.new(1, 0, 1, -96)
+body.Position = UDim2.new(0, 0, 0, 122)
+body.Size = UDim2.new(1, 0, 1, -122)
 body.ScrollBarThickness = 6
 body.ScrollingDirection = Enum.ScrollingDirection.XY
 body.AutomaticCanvasSize = Enum.AutomaticSize.XY
@@ -763,10 +844,10 @@ keyLabel.Parent = keyPanel
 applyLayout = function()
 	if abbrevMode then
 		keyPanel.Visible = true
-		body.Size = UDim2.new(1, 0, 1, -(96 + KEY_PANEL_H + 4))
+		body.Size = UDim2.new(1, 0, 1, -(122 + KEY_PANEL_H + 4))
 	else
 		keyPanel.Visible = false
-		body.Size = UDim2.new(1, 0, 1, -96)
+		body.Size = UDim2.new(1, 0, 1, -122)
 	end
 end
 
@@ -808,12 +889,27 @@ copyClose.Size = UDim2.new(0, 0, 0, 22)
 copyClose.ZIndex = 51
 copyClose.MouseButton1Click:Connect(function() copyOverlay.Visible = false end)
 
+-- Scroll container (clips text to below the top bar; shows scrollbars).
+local copyScroll = Instance.new("ScrollingFrame")
+copyScroll.BackgroundColor3 = THEME.bg
+copyScroll.BorderColor3 = THEME.border
+copyScroll.BorderSizePixel = 1
+copyScroll.Position = UDim2.new(0, 0, 0, 26)
+copyScroll.Size = UDim2.new(1, 0, 1, -26)
+copyScroll.ClipsDescendants = true
+copyScroll.ScrollBarThickness = 8
+copyScroll.ScrollingDirection = Enum.ScrollingDirection.XY
+copyScroll.AutomaticCanvasSize = Enum.AutomaticSize.XY
+copyScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+copyScroll.ZIndex = 51
+copyScroll.Parent = copyOverlay
+
 local copyBox = Instance.new("TextBox")
-copyBox.BackgroundColor3 = THEME.bg
-copyBox.BorderColor3 = THEME.border
-copyBox.BorderSizePixel = 1
-copyBox.Position = UDim2.new(0, 0, 0, 26)
-copyBox.Size = UDim2.new(1, 0, 1, -26)
+copyBox.BackgroundTransparency = 1
+copyBox.BorderSizePixel = 0
+copyBox.Position = UDim2.new(0, 0, 0, 0)
+copyBox.Size = UDim2.new(0, 0, 0, 0)
+copyBox.AutomaticSize = Enum.AutomaticSize.XY
 copyBox.Font = Enum.Font.Code
 copyBox.TextSize = 14
 copyBox.TextColor3 = THEME.text
@@ -825,16 +921,19 @@ copyBox.TextEditable = true
 copyBox.TextWrapped = false
 copyBox.Text = ""
 copyBox.ZIndex = 51
-copyBox.Parent = copyOverlay
+copyBox.Parent = copyScroll
 do
 	local p = Instance.new("UIPadding")
 	p.PaddingLeft = UDim.new(0, 6)
 	p.PaddingTop = UDim.new(0, 4)
+	p.PaddingRight = UDim.new(0, 10)
+	p.PaddingBottom = UDim.new(0, 10)
 	p.Parent = copyBox
 end
 
 local function showCopy(text)
 	copyBox.Text = text
+	copyScroll.CanvasPosition = Vector2.new(0, 0)
 	copyOverlay.Visible = true
 	task.defer(function()
 		copyBox:CaptureFocus()
@@ -927,10 +1026,13 @@ owCancel.ZIndex = 51
 
 local bodyRows = {}
 
-local function setSelected(inst)
-	selectedInst = inst
+-- Paint every row's background from the current selection (latest = brighter).
+applyHighlight = function()
 	for _, row in ipairs(bodyRows) do
-		if row.inst and row.inst == inst then
+		if row.inst and row.inst == latestInst then
+			row.button.BackgroundTransparency = 0
+			row.button.BackgroundColor3 = THEME.rowLatest
+		elseif row.inst and selectionSet[row.inst] then
 			row.button.BackgroundTransparency = 0
 			row.button.BackgroundColor3 = THEME.rowSel
 		else
@@ -940,6 +1042,102 @@ local function setSelected(inst)
 	if paintOverwrite then paintOverwrite() end
 	if paintPad then paintPad() end
 	if paintMark then paintMark() end
+end
+
+-- Mirror the plugin selection into Studio's Explorer (guarded against feedback).
+syncSelectionToStudio = function()
+	applyingSelection = true
+	pcall(function() Selection:Set(selection) end)
+	applyingSelection = false
+end
+
+local function rebuildSelectionSet()
+	selectionSet = {}
+	for _, inst in ipairs(selection) do
+		selectionSet[inst] = true
+	end
+end
+
+-- Compare two instance lists as sets (order-independent).
+local function sameSelection(a, b)
+	if #a ~= #b then return false end
+	local set = {}
+	for _, x in ipairs(a) do set[x] = true end
+	for _, x in ipairs(b) do
+		if not set[x] then return false end
+	end
+	return true
+end
+
+-- Ordered list of currently displayed node instances (for Shift range select).
+local function orderedNodeInsts()
+	local list = {}
+	for _, row in ipairs(bodyRows) do
+		if row.inst then table.insert(list, row.inst) end
+	end
+	return list
+end
+
+local function setSingleSelection(inst)
+	selection = { inst }
+	selectionSet = { [inst] = true }
+	latestInst = inst
+	anchorInst = inst
+end
+
+-- Handle a click on a node row, honoring Ctrl (toggle) and Shift (range).
+local function onNodeClicked(inst)
+	local ctrl = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
+		or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
+	local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+		or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+
+	if shift and anchorInst then
+		local ordered = orderedNodeInsts()
+		local ia, ib
+		for i, n in ipairs(ordered) do
+			if n == anchorInst then ia = i end
+			if n == inst then ib = i end
+		end
+		if ia and ib then
+			if ia > ib then ia, ib = ib, ia end
+			for i = ia, ib do
+				local n = ordered[i]
+				if not selectionSet[n] then
+					table.insert(selection, n)
+					selectionSet[n] = true
+				end
+			end
+			latestInst = inst
+		else
+			setSingleSelection(inst)
+		end
+	elseif ctrl then
+		if selectionSet[inst] then
+			for i = #selection, 1, -1 do
+				if selection[i] == inst then table.remove(selection, i) end
+			end
+			selectionSet[inst] = nil
+			latestInst = selection[#selection] -- may be nil
+		else
+			table.insert(selection, inst)
+			selectionSet[inst] = true
+			latestInst = inst
+		end
+		anchorInst = inst
+	else
+		setSingleSelection(inst)
+	end
+
+	applyHighlight()
+	syncSelectionToStudio()
+end
+
+local function clearSelection()
+	selection = {}
+	selectionSet = {}
+	latestInst = nil
+	anchorInst = nil
 end
 
 local function clearBody()
@@ -957,7 +1155,7 @@ local function addGuides(rowObj, guides)
 		line.Name = "Guide"
 		line.BackgroundColor3 = THEME.guide
 		line.BorderSizePixel = 0
-		line.Size = UDim2.new(0, 2, 1, 0)
+		line.Size = UDim2.new(0, 1, 1, 0)
 		line.Position = UDim2.new(0, guideX(depth), 0, 0)
 		-- Above the opaque row/body background (ZIndex 1) so it stays visible in
 		-- both Global and Sibling ZIndexBehavior; it sits in the indent gap, so
@@ -1003,15 +1201,16 @@ local function createRow(item, order)
 	btn.Font = Enum.Font.Code
 	btn.TextSize = 14
 	btn.TextXAlignment = Enum.TextXAlignment.Left
-	btn.RichText = item.rich
-	btn.Text = item.displayText
 	btn.LayoutOrder = order
 	if item.detached then
+		-- orphaned node / empty-group placeholder: dim, no class coloring
+		btn.RichText = false
+		btn.Text = item.inst and item.copyText or item.displayText
 		btn.TextColor3 = THEME.textDim
-	elseif item.inst and item.kind ~= "service" then
-		-- color node names by ClassName (services stay default white)
-		btn.TextColor3 = CLASS_COLOR[safeClass(item.inst)] or THEME.text
 	else
+		-- Name in default color; only the (ClassName) is colored (via RichText)
+		btn.RichText = item.rich
+		btn.Text = item.displayText
 		btn.TextColor3 = THEME.text
 	end
 	local pad = Instance.new("UIPadding")
@@ -1019,18 +1218,26 @@ local function createRow(item, order)
 	pad.Parent = btn
 
 	if item.inst then
+		local inst = item.inst
 		btn.MouseEnter:Connect(function()
-			if selectedInst ~= item.inst then
+			if inst ~= latestInst and not selectionSet[inst] then
 				btn.BackgroundTransparency = 0
 				btn.BackgroundColor3 = THEME.rowHover
 			end
 		end)
 		btn.MouseLeave:Connect(function()
-			if selectedInst ~= item.inst then btn.BackgroundTransparency = 1 end
+			if inst == latestInst then
+				btn.BackgroundTransparency = 0
+				btn.BackgroundColor3 = THEME.rowLatest
+			elseif selectionSet[inst] then
+				btn.BackgroundTransparency = 0
+				btn.BackgroundColor3 = THEME.rowSel
+			else
+				btn.BackgroundTransparency = 1
+			end
 		end)
 		btn.MouseButton1Click:Connect(function()
-			setSelected(item.inst)
-			pcall(function() Selection:Set({ item.inst }) end)
+			onNodeClicked(inst)
 		end)
 	end
 
@@ -1044,11 +1251,21 @@ refreshView = function()
 	local g = activeGroup()
 	if not g then return end
 	pruneStale(g)
+	-- drop selected nodes that are no longer in this group
+	local keptSel = {}
+	for _, inst in ipairs(selection) do
+		if g.byInst[inst] then table.insert(keptSel, inst) end
+	end
+	selection = keptSel
+	rebuildSelectionSet()
+	if latestInst and not selectionSet[latestInst] then latestInst = selection[#selection] end
+	if anchorInst and not selectionSet[anchorInst] then anchorInst = latestInst end
+
 	local items = buildItems(g)
 	for i, item in ipairs(items) do
 		createRow(item, i)
 	end
-	if selectedInst then setSelected(selectedInst) end
+	applyHighlight()
 	-- key panel
 	if abbrevMode then
 		keyLabel.Text = keyBlockText({ g })
@@ -1068,7 +1285,7 @@ local function makeTab(parent, group, index, isActive)
 	b.MouseLeave:Connect(function() b.BackgroundColor3 = base end)
 	b.MouseButton1Click:Connect(function()
 		activeIndex = index
-		selectedInst = nil
+		clearSelection()
 		save()
 		refreshAll()
 	end)
@@ -1134,6 +1351,7 @@ end
 nameBox.FocusLost:Connect(function()
 	local g = activeGroup()
 	if g and nameBox.Text ~= "" and nameBox.Text ~= g.name then
+		pushUndo()
 		g.name = nameBox.Text
 		save()
 		refreshTabs()
@@ -1144,6 +1362,7 @@ nameBox.FocusLost:Connect(function()
 end)
 
 delGroupBtn.MouseButton1Click:Connect(function()
+	pushUndo()
 	if #groups <= 1 then
 		-- clearing the last group = fresh slate
 		groups[1] = { name = "Group 1", entries = {}, byInst = {}, counter = 0 }
@@ -1152,12 +1371,12 @@ delGroupBtn.MouseButton1Click:Connect(function()
 		table.remove(groups, activeIndex)
 		if activeIndex > #groups then activeIndex = #groups end
 	end
-	selectedInst = nil
+	clearSelection()
 	save()
 	refreshAll()
 end)
 
--- Action row
+-- Row 1: capture + copy
 makeButton(actionRow, "+ Add Selection", function()
 	local g = activeGroup()
 	if not g then return end
@@ -1166,9 +1385,14 @@ makeButton(actionRow, "+ Add Selection", function()
 		warn("[ExplorerReference] Select something in the Explorer first.")
 		return
 	end
-	for _, inst in ipairs(sel) do addInstanceChain(g, inst) end
-	save()
-	refreshView()
+	local pre = snapshotState()
+	local added = 0
+	for _, inst in ipairs(sel) do added += addInstanceChain(g, inst) end
+	if added > 0 then
+		commitUndo(pre)
+		save()
+		refreshView()
+	end
 end)
 
 do
@@ -1178,123 +1402,18 @@ do
 			-- immediately capture whatever's already selected
 			local g = activeGroup()
 			if g then
-				for _, inst in ipairs(Selection:Get()) do addInstanceChain(g, inst) end
-				save()
-				refreshView()
+				local pre = snapshotState()
+				local added = 0
+				for _, inst in ipairs(Selection:Get()) do added += addInstanceChain(g, inst) end
+				if added > 0 then
+					commitUndo(pre)
+					save()
+					refreshView()
+				end
 			end
 		end
 	end)
 	paintMulti = paint
-end
-
-makeButton(actionRow, "Sync", function()
-	local g = activeGroup()
-	if not g then return end
-	pruneStale(g)
-	save()
-	refreshView()
-end)
-
-do
-	local _, paint = makeToggle(actionRow, "Overwrite", function()
-		local g = activeGroup()
-		local e = selectedInst and g and entryFor(g, selectedInst)
-		return e ~= nil and e.detail ~= nil and e.detail ~= ""
-	end, function()
-		local g = activeGroup()
-		if not g or not selectedInst then
-			warn("[ExplorerReference] Click a node in the list first, then press Overwrite.")
-			return
-		end
-		local e = entryFor(g, selectedInst)
-		if not e then return end
-		owTarget = selectedInst
-		owBaseLabel.Text = defaultLabelFull(selectedInst)
-		owBox.Text = (e.detail and e.detail ~= "") and e.detail or ""
-		owOverlay.Visible = true
-		task.defer(function()
-			owBox:CaptureFocus()
-			owBox.CursorPosition = #owBox.Text + 1
-		end)
-	end)
-	paintOverwrite = paint
-end
-
-makeButton(actionRow, "Delete", function()
-	local g = activeGroup()
-	if not g or not selectedInst then
-		warn("[ExplorerReference] Click a node in the list first.")
-		return
-	end
-	deleteSubtree(g, selectedInst)
-	selectedInst = nil
-	save()
-	refreshView()
-end)
-
-makeButton(actionRow, "Up", function()
-	local g = activeGroup()
-	if not g or not selectedInst then return end
-	moveNode(g, selectedInst, -1)
-	save()
-	refreshView()
-end)
-
-makeButton(actionRow, "Down", function()
-	local g = activeGroup()
-	if not g or not selectedInst then return end
-	moveNode(g, selectedInst, 1)
-	save()
-	refreshView()
-end)
-
-do
-	local _, paint = makeToggle(actionRow, "Pad", function()
-		local g = activeGroup()
-		local e = selectedInst and g and entryFor(g, selectedInst)
-		return e ~= nil and e.padded == true
-	end, function()
-		local g = activeGroup()
-		if not g or not selectedInst then
-			warn("[ExplorerReference] Click a node in the list first, then press Pad.")
-			return
-		end
-		local e = entryFor(g, selectedInst)
-		if not e then return end
-		e.padded = not e.padded
-		save()
-		refreshView()
-	end)
-	paintPad = paint
-end
-
-do
-	local _, paint = makeToggle(actionRow, "Mark", function()
-		local g = activeGroup()
-		local e = selectedInst and g and entryFor(g, selectedInst)
-		return e ~= nil and e.marked == true
-	end, function()
-		local g = activeGroup()
-		if not g or not selectedInst then
-			warn("[ExplorerReference] Click a parent node in the list first, then press Mark.")
-			return
-		end
-		local e = entryFor(g, selectedInst)
-		if not e then return end
-		e.marked = not e.marked
-		save()
-		refreshView()
-	end)
-	paintMark = paint
-end
-
-do
-	local _, paint = makeToggle(actionRow, "Abbrev", function() return abbrevMode end, function()
-		abbrevMode = not abbrevMode
-		save()
-		refreshView()
-	end)
-	paintAbbrev = paint
 end
 
 makeButton(actionRow, "Copy", function()
@@ -1307,15 +1426,139 @@ makeButton(actionRow, "Copy All", function()
 	showCopy(allGroupsToText())
 end)
 
+-- Row 2: node operations. Single-target actions act on the latest selected node.
+makeButton(actionRow2, "Sync", function()
+	local g = activeGroup()
+	if not g then return end
+	pruneStale(g)
+	save()
+	refreshView()
+end)
+
+do
+	local _, paint = makeToggle(actionRow2, "Overwrite", function()
+		local g = activeGroup()
+		local e = latestInst and g and entryFor(g, latestInst)
+		return e ~= nil and e.detail ~= nil and e.detail ~= ""
+	end, function()
+		local g = activeGroup()
+		if not g or not latestInst then
+			warn("[ExplorerReference] Click a node in the list first, then press Overwrite.")
+			return
+		end
+		local e = entryFor(g, latestInst)
+		if not e then return end
+		owTarget = latestInst
+		owBaseLabel.Text = defaultLabelFull(latestInst)
+		owBox.Text = (e.detail and e.detail ~= "") and e.detail or ""
+		owOverlay.Visible = true
+		task.defer(function()
+			owBox:CaptureFocus()
+			owBox.CursorPosition = #owBox.Text + 1
+		end)
+	end)
+	paintOverwrite = paint
+end
+
+makeButton(actionRow2, "Remove", function()
+	local g = activeGroup()
+	if not g or #selection == 0 then
+		warn("[ExplorerReference] Select node(s) in the list first.")
+		return
+	end
+	pushUndo()
+	local targets = {}
+	for _, inst in ipairs(selection) do table.insert(targets, inst) end
+	for _, inst in ipairs(targets) do
+		if g.byInst[inst] then deleteSubtree(g, inst) end
+	end
+	clearSelection()
+	save()
+	refreshView()
+end)
+
+makeButton(actionRow2, "Up", function()
+	local g = activeGroup()
+	if not g or not latestInst then return end
+	pushUndo()
+	moveNode(g, latestInst, -1)
+	save()
+	refreshView()
+end)
+
+makeButton(actionRow2, "Down", function()
+	local g = activeGroup()
+	if not g or not latestInst then return end
+	pushUndo()
+	moveNode(g, latestInst, 1)
+	save()
+	refreshView()
+end)
+
+do
+	local _, paint = makeToggle(actionRow2, "Pad", function()
+		local g = activeGroup()
+		local e = latestInst and g and entryFor(g, latestInst)
+		return e ~= nil and e.padded == true
+	end, function()
+		local g = activeGroup()
+		if not g or not latestInst then
+			warn("[ExplorerReference] Click a node in the list first, then press Pad.")
+			return
+		end
+		local e = entryFor(g, latestInst)
+		if not e then return end
+		pushUndo()
+		e.padded = not e.padded
+		save()
+		refreshView()
+	end)
+	paintPad = paint
+end
+
+do
+	local _, paint = makeToggle(actionRow2, "Mark", function()
+		local g = activeGroup()
+		local e = latestInst and g and entryFor(g, latestInst)
+		return e ~= nil and e.marked == true
+	end, function()
+		local g = activeGroup()
+		if not g or not latestInst then
+			warn("[ExplorerReference] Click a parent node in the list first, then press Mark.")
+			return
+		end
+		local e = entryFor(g, latestInst)
+		if not e then return end
+		pushUndo()
+		e.marked = not e.marked
+		save()
+		refreshView()
+	end)
+	paintMark = paint
+end
+
+do
+	local _, paint = makeToggle(actionRow2, "Abbrev", function() return abbrevMode end, function()
+		abbrevMode = not abbrevMode
+		save()
+		refreshView()
+	end)
+	paintAbbrev = paint
+end
+
 -- Overwrite editor buttons
 local function applyOverwrite()
 	local g = activeGroup()
 	local e = owTarget and g and entryFor(g, owTarget)
 	if e then
 		local txt = owBox.Text
-		e.detail = (txt ~= "") and txt or nil
-		save()
-		refreshView()
+		local newDetail = (txt ~= "") and txt or nil
+		if newDetail ~= e.detail then
+			pushUndo()
+			e.detail = newDetail
+			save()
+			refreshView()
+		end
 	end
 	owOverlay.Visible = false
 	if paintOverwrite then paintOverwrite() end
@@ -1328,7 +1571,8 @@ end)
 owRemove.MouseButton1Click:Connect(function()
 	local g = activeGroup()
 	local e = owTarget and g and entryFor(g, owTarget)
-	if e then
+	if e and e.detail ~= nil then
+		pushUndo()
 		e.detail = nil
 		save()
 		refreshView()
@@ -1359,14 +1603,56 @@ end)
 
 Selection.SelectionChanged:Connect(function()
 	if not widget.Enabled then return end
-	if multiSelect then
+
+	-- Multi-Select: auto-add whatever is selected in the Explorer.
+	if multiSelect and not applyingSelection then
 		local g = activeGroup()
 		if g then
-			for _, inst in ipairs(Selection:Get()) do addInstanceChain(g, inst) end
-			save()
-			refreshView()
+			local pre = snapshotState()
+			local added = 0
+			for _, inst in ipairs(Selection:Get()) do added += addInstanceChain(g, inst) end
+			if added > 0 then
+				commitUndo(pre)
+				save()
+				refreshView()
+			end
 		end
 	end
+
+	-- Mirror the Explorer selection into the plugin (nodes present in the group),
+	-- unless this change was caused by the plugin itself.
+	if applyingSelection then return end
+	local g = activeGroup()
+	if not g then return end
+	local newSel = {}
+	for _, inst in ipairs(Selection:Get()) do
+		if g.byInst[inst] then table.insert(newSel, inst) end
+	end
+	-- ignore an echo of our own selection so latest/anchor aren't disturbed
+	if sameSelection(newSel, selection) then return end
+	selection = newSel
+	rebuildSelectionSet()
+	latestInst = selection[#selection]
+	anchorInst = latestInst
+	applyHighlight()
+end)
+
+-- Undo / redo hotkeys, scoped to when the plugin window is focused so they
+-- don't fight Studio's global Ctrl+Z out in the viewport.
+local widgetFocused = false
+widget.WindowFocused:Connect(function() widgetFocused = true end)
+widget.WindowFocusReleased:Connect(function() widgetFocused = false end)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end -- e.g. typing in a TextBox
+	if not widget.Enabled or not widgetFocused then return end
+	if input.KeyCode ~= Enum.KeyCode.Z then return end
+	local ctrl = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
+		or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
+	if not ctrl then return end
+	local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+		or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+	if shift then redo() else undo() end
 end)
 
 --============================================================
