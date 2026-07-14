@@ -4,8 +4,6 @@ end
 
 local Selection = game:GetService("Selection")
 local HttpService = game:GetService("HttpService")
-local CoreGui = game:GetService("CoreGui")
-local UserInputService = game:GetService("UserInputService")
 
 --============================================================
 -- Config / Theme
@@ -13,8 +11,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local INDENT = "  " -- 2 spaces per depth level
 local DATA_KEY_BASE = "ExplorerReference_Data_v2" -- suffixed with GameId per experience
-local WINDOW_KEY = "ExplorerReference_Window_v2" -- window geometry (global preference)
-local DIFF_COLOR = "#FF6B6B" -- red for overwrite diffs
+local DIFF_COLOR = "#FF6B6B" -- red for the appended detail
 
 local THEME = {
 	bg       = Color3.fromRGB(30, 30, 30),
@@ -474,170 +471,40 @@ local function load()
 end
 
 --============================================================
--- Window (draggable CoreGui ScreenGui — no dock overlay)
+-- Dock widget
 --============================================================
 
--- Remove any leftover window from a previous load of this plugin
-local prev = CoreGui:FindFirstChild("ExplorerReferenceGui")
-if prev then prev:Destroy() end
+local widgetInfo = DockWidgetPluginGuiInfo.new(
+	Enum.InitialDockState.Float,
+	false, -- start closed
+	false, -- do not override the previously saved enabled state
+	470, 620, -- default float size
+	320, 320 -- minimum size
+)
 
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "ExplorerReferenceGui"
-screenGui.DisplayOrder = 1000000 -- above other GUIs
-screenGui.ResetOnSpawn = false
-screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-screenGui.Enabled = false
-screenGui.Parent = CoreGui
+-- Prefer the non-deprecated Async creator; fall back if this Studio lacks it.
+local widget
+pcall(function()
+	widget = plugin:CreateDockWidgetPluginGuiAsync("ExplorerReferencePanel", widgetInfo)
+end)
+if not widget then
+	widget = plugin:CreateDockWidgetPluginGui("ExplorerReferencePanel", widgetInfo)
+end
+widget.Title = "Explorer Reference"
 
--- The window is a TextButton (not a Frame): a GuiButton reliably sinks mouse
--- input, so clicks/drags anywhere over the window are absorbed instead of
--- passing through to the Studio viewport (no accidental selecting/camera moves).
-local window = Instance.new("TextButton")
-window.Name = "Window"
-window.Text = ""
-window.AutoButtonColor = false
-window.Selectable = false
-window.Size = UDim2.new(0, 470, 0, 620)
-window.Position = UDim2.new(0, 220, 0, 120)
-window.BackgroundColor3 = THEME.bg
-window.BorderSizePixel = 0
-window.Active = true
-window.Parent = screenGui
-do
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = THEME.border
-	stroke.Thickness = 1
-	stroke.Parent = window
+-- Clear leftover children if this plugin re-ran in the same session (the
+-- widget itself is persistent across reloads).
+for _, c in ipairs(widget:GetChildren()) do
+	c:Destroy()
 end
 
--- Title bar (drag handle)
-local titleBar = Instance.new("Frame")
-titleBar.Name = "TitleBar"
-titleBar.Size = UDim2.new(1, 0, 0, 26)
-titleBar.BackgroundColor3 = THEME.bar
-titleBar.BorderSizePixel = 0
-titleBar.Active = true
-titleBar.Parent = window
-
-local titleText = Instance.new("TextLabel")
-titleText.BackgroundTransparency = 1
-titleText.Size = UDim2.new(1, -60, 1, 0)
-titleText.Position = UDim2.new(0, 8, 0, 0)
-titleText.Font = Enum.Font.GothamMedium
-titleText.TextSize = 13
-titleText.TextColor3 = THEME.text
-titleText.TextXAlignment = Enum.TextXAlignment.Left
-titleText.Text = "Explorer Reference"
-titleText.Parent = titleBar
-
-local closeBtn = Instance.new("TextButton")
-closeBtn.AnchorPoint = Vector2.new(1, 0.5)
-closeBtn.Position = UDim2.new(1, -6, 0.5, 0)
-closeBtn.Size = UDim2.new(0, 22, 0, 20)
-closeBtn.BackgroundColor3 = THEME.btn
-closeBtn.BorderSizePixel = 0
-closeBtn.Font = Enum.Font.GothamBold
-closeBtn.TextSize = 13
-closeBtn.TextColor3 = THEME.text
-closeBtn.Text = "X"
-closeBtn.AutoButtonColor = true
-closeBtn.Parent = titleBar
-do
-	local c = Instance.new("UICorner")
-	c.CornerRadius = UDim.new(0, 4)
-	c.Parent = closeBtn
-end
-
--- Content region below the title bar (everything else lives here)
+-- Root frame filling the widget; everything else parents into this.
 local content = Instance.new("Frame")
 content.Name = "Content"
-content.BackgroundTransparency = 1
-content.Position = UDim2.new(0, 0, 0, 26)
-content.Size = UDim2.new(1, 0, 1, -26)
-content.Parent = window
-
--- Resize grip (bottom-right)
-local resizeGrip = Instance.new("TextButton")
-resizeGrip.AnchorPoint = Vector2.new(1, 1)
-resizeGrip.Position = UDim2.new(1, 0, 1, 0)
-resizeGrip.Size = UDim2.new(0, 16, 0, 16)
-resizeGrip.BackgroundColor3 = THEME.btn
-resizeGrip.BorderSizePixel = 0
-resizeGrip.Text = "//"
-resizeGrip.Font = Enum.Font.GothamBold
-resizeGrip.TextSize = 11
-resizeGrip.TextColor3 = THEME.textDim
-resizeGrip.AutoButtonColor = false
-resizeGrip.ZIndex = 5
-resizeGrip.Parent = window
-
--- Window geometry persistence
-local function saveWindowPrefs()
-	pcall(function()
-		plugin:SetSetting(WINDOW_KEY, HttpService:JSONEncode({
-			x = window.Position.X.Offset,
-			y = window.Position.Y.Offset,
-			w = window.Size.X.Offset,
-			h = window.Size.Y.Offset,
-		}))
-	end)
-end
-
-local function loadWindowPrefs()
-	local raw = plugin:GetSetting(WINDOW_KEY)
-	if not raw then return end
-	local ok, g = pcall(function() return HttpService:JSONDecode(raw) end)
-	if ok and type(g) == "table" and g.w and g.h then
-		window.Size = UDim2.new(0, math.max(340, g.w), 0, math.max(320, g.h))
-		window.Position = UDim2.new(0, g.x or 220, 0, g.y or 120)
-	end
-end
-
--- Dragging
-local dragging, dragStart, dragStartPos = false, nil, nil
-titleBar.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		dragging = true
-		dragStart = input.Position
-		dragStartPos = window.Position
-	end
-end)
-
--- Resizing
-local resizing, resizeStart, resizeStartSize = false, nil, nil
-resizeGrip.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		resizing = true
-		resizeStart = input.Position
-		resizeStartSize = window.Size
-	end
-end)
-
-UserInputService.InputChanged:Connect(function(input)
-	if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-	if dragging then
-		local delta = input.Position - dragStart
-		window.Position = UDim2.new(0, dragStartPos.X.Offset + delta.X, 0, dragStartPos.Y.Offset + delta.Y)
-	elseif resizing then
-		local delta = input.Position - resizeStart
-		local w = math.max(340, resizeStartSize.X.Offset + delta.X)
-		local h = math.max(320, resizeStartSize.Y.Offset + delta.Y)
-		window.Size = UDim2.new(0, w, 0, h)
-		applyLayout()
-	end
-end)
-
-UserInputService.InputEnded:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		if dragging or resizing then saveWindowPrefs() end
-		dragging = false
-		resizing = false
-	end
-end)
-
-closeBtn.MouseButton1Click:Connect(function()
-	screenGui.Enabled = false
-end)
+content.Size = UDim2.new(1, 0, 1, 0)
+content.BackgroundColor3 = THEME.bg
+content.BorderSizePixel = 0
+content.Parent = widget
 
 --============================================================
 -- Widget-building helpers
@@ -847,11 +714,11 @@ local function makeOverlay()
 	o.BackgroundColor3 = THEME.bg
 	o.BorderSizePixel = 0
 	o.Active = true -- sink input so the node list underneath isn't clickable
-	o.Position = UDim2.new(0, 0, 0, 26)
-	o.Size = UDim2.new(1, 0, 1, -26)
+	o.Position = UDim2.new(0, 0, 0, 0)
+	o.Size = UDim2.new(1, 0, 1, 0)
 	o.Visible = false
 	o.ZIndex = 50
-	o.Parent = window
+	o.Parent = content
 	return o
 end
 
@@ -1350,17 +1217,20 @@ end)
 --============================================================
 
 local toolbar = plugin:CreateToolbar("Explorer Reference")
-local toggleButton = toolbar:CreateButton("ExplorerReferenceToggle", "Show / hide the Explorer Reference window", "", "Explorer Ref")
+local toggleButton = toolbar:CreateButton("ExplorerReferenceToggle", "Show / hide the Explorer Reference panel", "", "Explorer Ref")
 toggleButton.ClickableWhenViewportHidden = true
 
 toggleButton.Click:Connect(function()
-	screenGui.Enabled = not screenGui.Enabled
-	toggleButton:SetActive(screenGui.Enabled)
-	if screenGui.Enabled then refreshAll() end
+	widget.Enabled = not widget.Enabled
+end)
+
+widget:GetPropertyChangedSignal("Enabled"):Connect(function()
+	toggleButton:SetActive(widget.Enabled)
+	if widget.Enabled then refreshAll() end
 end)
 
 Selection.SelectionChanged:Connect(function()
-	if not screenGui.Enabled then return end
+	if not widget.Enabled then return end
 	if multiSelect then
 		local g = activeGroup()
 		if g then
@@ -1371,16 +1241,11 @@ Selection.SelectionChanged:Connect(function()
 	end
 end)
 
-plugin.Unloading:Connect(function()
-	if screenGui then screenGui:Destroy() end
-end)
-
 --============================================================
 -- Init
 --============================================================
 
 load()
 if #groups == 0 then newGroup(true) end
-loadWindowPrefs()
 applyLayout()
 refreshAll()
