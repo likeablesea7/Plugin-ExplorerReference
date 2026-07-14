@@ -1,5 +1,5 @@
 --[[
-	Explorer Reference  —  v1 (prototype)
+	Explorer Reference  —  v2
 	------------------------------------------------------------------
 	A Roblox Studio plugin for generating clean, copy-pasteable text
 	references of your Explorer hierarchy (great for handing structure
@@ -15,16 +15,27 @@
 	    move / rename / reparent something in Studio and hit "Sync", the
 	    indentation fixes itself automatically. No more hand-editing markers.
 	  * Click a node to select it (also selects it in Studio). Then you can
-	    Delete it, or Move it Up / Down among its siblings.
+	    Delete it, Move it Up / Down, or Overwrite its label.
 	  * "Copy" / "Copy All" open a select-all textbox you Ctrl+C from
 	    (Studio plugins can't write the clipboard directly).
 
-	Output format (v1): 2-space indentation, `Name (ClassName)` per line,
-	`---- GroupName ----` section headers. Compact + maximally AI-legible.
-	Change INDENT / header style below to taste.
+	v2 additions
+	------------
+	  * Per-experience data: groups are stored keyed by game.GameId, so
+	    different games never share or overwrite each other's references.
+	  * Multi-Select mode: toggle on to auto-add every element you click in
+	    the Explorer.
+	  * Overwrite: give any node a custom label; the characters you added vs
+	    the real "Name (ClassName)" show up red as a live diff. Survives
+	    Sync / move / rename until you remove it. Copy uses the overwrite.
+	  * Abbreviated class names ((F) instead of (Frame)) with an auto key
+	    list, toggleable.
+	  * Draggable/resizable window (in CoreGui, always on top) instead of a
+	    dock widget — no more docking overlay.
+	  * Tab reordering via the < > arrows on the active tab.
 
-	This is a styling/feel prototype — the goal is to react to the look and
-	the core loop before we build the heavier features.
+	Output format: 2-space indentation, `Name (ClassName)` per line,
+	`---- GroupName ----` section headers. Change INDENT below to taste.
 --]]
 
 if not plugin then
@@ -33,13 +44,17 @@ end
 
 local Selection = game:GetService("Selection")
 local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
 
 --============================================================
 -- Config / Theme
 --============================================================
 
 local INDENT = "  " -- 2 spaces per depth level
-local SETTING_KEY = "ExplorerReference_Data_v1"
+local DATA_KEY_BASE = "ExplorerReference_Data_v2" -- suffixed with GameId per experience
+local WINDOW_KEY = "ExplorerReference_Window_v2" -- window geometry (global preference)
+local DIFF_COLOR = "#FF6B6B" -- red for overwrite diffs
 
 local THEME = {
 	bg       = Color3.fromRGB(30, 30, 30),
@@ -55,20 +70,54 @@ local THEME = {
 	border   = Color3.fromRGB(60, 60, 62),
 }
 
+-- Curated class-name abbreviations. Anything not here keeps its full name.
+-- Values are unique so the generated key is unambiguous.
+local CLASS_ABBREV = {
+	ScreenGui = "SG", SurfaceGui = "SuG", BillboardGui = "BG",
+	Frame = "F", ScrollingFrame = "SF", CanvasGroup = "CG",
+	TextButton = "TB", TextLabel = "TL", TextBox = "TX",
+	ImageButton = "IB", ImageLabel = "IL", ViewportFrame = "VF", VideoFrame = "VdF",
+	Folder = "Fol", Configuration = "Cfg",
+	LocalScript = "LS", Script = "Scr", ModuleScript = "MS",
+	Part = "Prt", MeshPart = "MP", UnionOperation = "Un", Model = "Mdl",
+	WedgePart = "WP", TrussPart = "TP", CornerWedgePart = "CWP",
+	SpawnLocation = "SL", Seat = "St", VehicleSeat = "VS",
+	Attachment = "Att", Bone = "Bn",
+	Weld = "Wld", WeldConstraint = "WC", Motor6D = "M6D", Motor = "Mtr",
+	HingeConstraint = "HgC", SpringConstraint = "SpC", RodConstraint = "RdC",
+	RopeConstraint = "RpC", BallSocketConstraint = "BSC", PrismaticConstraint = "PmC",
+	CylindricalConstraint = "CyC",
+	RemoteEvent = "RE", RemoteFunction = "RF", BindableEvent = "BE", BindableFunction = "BF",
+	UIListLayout = "UIL", UIGridLayout = "UIG", UITableLayout = "UIT", UIPageLayout = "UIPg",
+	UIPadding = "UIP", UICorner = "UIC", UIGradient = "UIGr", UIStroke = "UIS",
+	UIScale = "UISc", UIAspectRatioConstraint = "UIAR", UISizeConstraint = "UISz",
+	Sound = "Snd", SoundGroup = "SGr",
+	NumberValue = "NV", StringValue = "StV", BoolValue = "BV", IntValue = "IV",
+	ObjectValue = "OV", Color3Value = "C3V", Vector3Value = "V3V", CFrameValue = "CFV",
+	Camera = "Cam", Highlight = "Hl", Beam = "Bm", ParticleEmitter = "PE", Trail = "Trl",
+	PointLight = "PL", SpotLight = "SpL", SurfaceLight = "SuL",
+	ProximityPrompt = "PP", ClickDetector = "CD", Decal = "Dcl", Texture = "Txt",
+	SpecialMesh = "SM", BlockMesh = "BM", CylinderMesh = "CM",
+}
+
 --============================================================
 -- State
 --============================================================
 
--- A group: { name, entries = { {inst, order}... }, byInst = {[Instance]=entry}, counter }
+-- group: { name, entries = { {inst, order, overwrite}... }, byInst = {[Instance]=entry}, counter }
 local groups = {}
 local activeIndex = 1
-local selectedInst = nil -- node currently highlighted inside the plugin
+local selectedInst = nil
+local multiSelect = false
+local abbrevMode = false
 
--- forward declarations (assigned later)
-local refreshAll, refreshView, refreshTabs, refreshStatus, save
+-- forward declarations
+local refreshAll, refreshView, refreshTabs, refreshNameBox, save
+local paintMulti, paintAbbrev, paintOverwrite
+local applyLayout
 
 --============================================================
--- Safe accessors (instances may be destroyed / detached)
+-- Safe accessors
 --============================================================
 
 local function safeParent(inst)
@@ -100,6 +149,94 @@ local function isService(inst)
 end
 
 --============================================================
+-- Labels / classes
+--============================================================
+
+-- The literal, full label a node reduces to: "Name (ClassName)" (service = "Name")
+local function defaultLabelFull(inst)
+	if isService(inst) then
+		return safeName(inst)
+	end
+	return safeName(inst) .. " (" .. safeClass(inst) .. ")"
+end
+
+-- The label shown when NOT overwritten, honoring abbreviation mode.
+local function displayLabel(inst)
+	if isService(inst) then
+		return safeName(inst)
+	end
+	local cn = safeClass(inst)
+	local shown = cn
+	if abbrevMode and CLASS_ABBREV[cn] then
+		shown = CLASS_ABBREV[cn]
+	end
+	return safeName(inst) .. " (" .. shown .. ")"
+end
+
+--============================================================
+-- RichText diff (for overwrites)
+--============================================================
+
+local function escapeRich(s)
+	s = s:gsub("&", "&amp;")
+	s = s:gsub("<", "&lt;")
+	s = s:gsub(">", "&gt;")
+	return s
+end
+
+-- Return `edited` as RichText, with characters that aren't part of the
+-- longest common subsequence with `original` wrapped in red.
+local function diffRich(original, edited)
+	local o, e = {}, {}
+	for i = 1, #original do o[i] = original:sub(i, i) end
+	for i = 1, #edited do e[i] = edited:sub(i, i) end
+	local n, m = #o, #e
+
+	local dp = {}
+	for i = 0, n do
+		dp[i] = {}
+		for j = 0, m do dp[i][j] = 0 end
+	end
+	for i = 1, n do
+		for j = 1, m do
+			if o[i] == e[j] then
+				dp[i][j] = dp[i - 1][j - 1] + 1
+			else
+				dp[i][j] = math.max(dp[i - 1][j], dp[i][j - 1])
+			end
+		end
+	end
+
+	local matched = {}
+	local i, j = n, m
+	while i > 0 and j > 0 do
+		if o[i] == e[j] then
+			matched[j] = true
+			i, j = i - 1, j - 1
+		elseif dp[i - 1][j] >= dp[i][j - 1] then
+			i = i - 1
+		else
+			j = j - 1
+		end
+	end
+
+	local out = {}
+	local k = 1
+	while k <= m do
+		if matched[k] then
+			local run = {}
+			while k <= m and matched[k] do table.insert(run, e[k]); k = k + 1 end
+			table.insert(out, escapeRich(table.concat(run)))
+		else
+			local run = {}
+			while k <= m and not matched[k] do table.insert(run, e[k]); k = k + 1 end
+			table.insert(out, '<font color="' .. DIFF_COLOR .. '">' .. escapeRich(table.concat(run)) .. "</font>")
+		end
+	end
+	return table.concat(out)
+end
+
+--============================================================
 -- Model
 --============================================================
 
@@ -107,11 +244,12 @@ local function activeGroup()
 	return groups[activeIndex]
 end
 
--- Add an instance and its whole ancestor chain (service -> ... -> inst)
-local function addInstanceChain(group, inst)
-	if not isValid(inst) then return end
-	if inst == game then return end
+local function entryFor(group, inst)
+	return group and group.byInst[inst]
+end
 
+local function addInstanceChain(group, inst)
+	if not isValid(inst) or inst == game then return end
 	local chain = {}
 	local n = inst
 	while n and n ~= game do
@@ -119,10 +257,9 @@ local function addInstanceChain(group, inst)
 		if safeParent(n) == game then break end
 		n = safeParent(n)
 	end
-
 	for _, node in ipairs(chain) do
 		if not group.byInst[node] then
-			local e = { inst = node, order = group.counter }
+			local e = { inst = node, order = group.counter, overwrite = nil }
 			group.counter += 1
 			table.insert(group.entries, e)
 			group.byInst[node] = e
@@ -130,20 +267,16 @@ local function addInstanceChain(group, inst)
 	end
 end
 
--- Remove stale (destroyed / detached) entries
 local function pruneStale(group)
 	local kept = {}
-	local removed = false
 	for _, e in ipairs(group.entries) do
 		if isValid(e.inst) then
 			table.insert(kept, e)
 		else
 			group.byInst[e.inst] = nil
-			removed = true
 		end
 	end
 	group.entries = kept
-	return removed
 end
 
 local function collectRoots(group)
@@ -170,24 +303,34 @@ local function collectChildren(group, parentEntry)
 	return kids
 end
 
--- Build a flat list of display items for a group.
--- Each item: { kind = "header"|"blank"|"service"|"node", text, inst?, depth?, detached? }
+-- Build display items for a group.
+-- item: { kind="header"|"blank"|"service"|"node", copyText, displayText, rich, inst, depth, detached }
 local function buildItems(group)
 	local items = {}
 	table.insert(items, { kind = "header", text = group.name })
 
 	local function dfs(entry, depth)
 		local inst = entry.inst
+		local prefix = string.rep(INDENT, depth)
 		local svc = isService(inst)
-		local label
-		if svc then
-			label = safeName(inst)
+		local copyText, displayText, rich
+
+		if entry.overwrite and entry.overwrite ~= "" then
+			copyText = prefix .. entry.overwrite
+			displayText = prefix .. diffRich(defaultLabelFull(inst), entry.overwrite)
+			rich = true
 		else
-			label = safeName(inst) .. " (" .. safeClass(inst) .. ")"
+			local label = displayLabel(inst)
+			copyText = prefix .. label
+			displayText = copyText
+			rich = false
 		end
+
 		table.insert(items, {
 			kind = svc and "service" or "node",
-			text = string.rep(INDENT, depth) .. label,
+			copyText = copyText,
+			displayText = displayText,
+			rich = rich,
 			inst = inst,
 			depth = depth,
 			detached = (depth == 0 and not svc),
@@ -200,20 +343,56 @@ local function buildItems(group)
 	local roots = collectRoots(group)
 	if #roots == 0 then
 		table.insert(items, { kind = "blank" })
-		table.insert(items, { kind = "node", text = "  (empty — select something in the Explorer and press Add Selection)", inst = nil, depth = 0, detached = true })
+		table.insert(items, {
+			kind = "node",
+			copyText = "",
+			displayText = "  (empty - select something in the Explorer and press Add Selection)",
+			rich = false,
+			inst = nil,
+			depth = 0,
+			detached = true,
+		})
 		return items
 	end
 
-	for i, root in ipairs(roots) do
-		if i > 1 then
-			table.insert(items, { kind = "blank" })
-		end
+	for idx, root in ipairs(roots) do
+		if idx > 1 then table.insert(items, { kind = "blank" }) end
 		dfs(root, 0)
 	end
 	return items
 end
 
--- Produce the copy-pasteable text for one group
+-- Distinct classes used by non-overwritten nodes across a list of groups,
+-- limited to those that actually have an abbreviation.
+local function collectAbbrevKeys(groupList)
+	local seen = {}
+	local order = {}
+	for _, g in ipairs(groupList) do
+		for _, e in ipairs(g.entries) do
+			if not (e.overwrite and e.overwrite ~= "") and not isService(e.inst) then
+				local cn = safeClass(e.inst)
+				local ab = CLASS_ABBREV[cn]
+				if ab and not seen[cn] then
+					seen[cn] = ab
+					table.insert(order, cn)
+				end
+			end
+		end
+	end
+	table.sort(order)
+	return order, seen
+end
+
+local function keyBlockText(groupList)
+	local order, seen = collectAbbrevKeys(groupList)
+	if #order == 0 then return "" end
+	local lines = { "Key:" }
+	for _, cn in ipairs(order) do
+		table.insert(lines, "  " .. seen[cn] .. " = " .. cn)
+	end
+	return table.concat(lines, "\n")
+end
+
 local function groupToText(group)
 	local items = buildItems(group)
 	local lines = {}
@@ -223,21 +402,46 @@ local function groupToText(group)
 		elseif it.kind == "blank" then
 			table.insert(lines, "")
 		elseif it.inst then
-			table.insert(lines, it.text)
+			table.insert(lines, it.copyText)
 		end
 	end
-	return table.concat(lines, "\n")
+	local text = table.concat(lines, "\n")
+	if abbrevMode then
+		local key = keyBlockText({ group })
+		if key ~= "" then
+			text = text .. "\n\n" .. key
+		end
+	end
+	return text
 end
 
 local function allGroupsToText()
 	local blocks = {}
 	for _, g in ipairs(groups) do
-		table.insert(blocks, groupToText(g))
+		-- temporarily strip per-group key; add one combined key at the end
+		local items = buildItems(g)
+		local lines = {}
+		for _, it in ipairs(items) do
+			if it.kind == "header" then
+				table.insert(lines, "---- " .. it.text .. " " .. string.rep("-", math.max(4, 44 - #it.text)))
+			elseif it.kind == "blank" then
+				table.insert(lines, "")
+			elseif it.inst then
+				table.insert(lines, it.copyText)
+			end
+		end
+		table.insert(blocks, table.concat(lines, "\n"))
 	end
-	return table.concat(blocks, "\n\n\n")
+	local text = table.concat(blocks, "\n\n\n")
+	if abbrevMode then
+		local key = keyBlockText(groups)
+		if key ~= "" then
+			text = text .. "\n\n\n" .. key
+		end
+	end
+	return text
 end
 
--- Delete a node and everything under it (within this group)
 local function deleteSubtree(group, inst)
 	local kept = {}
 	for _, e in ipairs(group.entries) do
@@ -255,14 +459,12 @@ local function deleteSubtree(group, inst)
 	group.entries = kept
 end
 
--- Move a node up/down among its display siblings
 local function moveNode(group, inst, dir)
 	local e = group.byInst[inst]
 	if not e then return end
 	local p = safeParent(inst)
 	local pe = p and group.byInst[p]
 	local siblings = pe and collectChildren(group, pe) or collectRoots(group)
-
 	local idx
 	for i, s in ipairs(siblings) do
 		if s == e then idx = i break end
@@ -270,14 +472,17 @@ local function moveNode(group, inst, dir)
 	if not idx then return end
 	local j = idx + dir
 	if j < 1 or j > #siblings then return end
-
 	local other = siblings[j]
 	e.order, other.order = other.order, e.order
 end
 
 --============================================================
--- Persistence (best-effort: store name-paths, re-resolve on load)
+-- Persistence (per experience, keyed by GameId)
 --============================================================
+
+local function dataKey()
+	return DATA_KEY_BASE .. "_" .. tostring(game.GameId)
+end
 
 local function pathOf(inst)
 	local names = {}
@@ -302,19 +507,19 @@ local function resolvePath(path)
 end
 
 save = function()
-	local data = { active = activeIndex, groups = {} }
+	local data = { active = activeIndex, abbrev = abbrevMode, groups = {} }
 	for _, g in ipairs(groups) do
 		local gg = { name = g.name, nodes = {} }
 		for _, e in ipairs(g.entries) do
 			local path = pathOf(e.inst)
 			if path then
-				table.insert(gg.nodes, { path = path, order = e.order })
+				table.insert(gg.nodes, { path = path, order = e.order, overwrite = e.overwrite })
 			end
 		end
 		table.insert(data.groups, gg)
 	end
 	pcall(function()
-		plugin:SetSetting(SETTING_KEY, HttpService:JSONEncode(data))
+		plugin:SetSetting(dataKey(), HttpService:JSONEncode(data))
 	end)
 end
 
@@ -330,7 +535,7 @@ local function newGroup(silent)
 end
 
 local function load()
-	local raw = plugin:GetSetting(SETTING_KEY)
+	local raw = plugin:GetSetting(dataKey())
 	if not raw then return end
 	local ok, data = pcall(function() return HttpService:JSONDecode(raw) end)
 	if not ok or type(data) ~= "table" or type(data.groups) ~= "table" then return end
@@ -343,7 +548,7 @@ local function load()
 		for _, nd in ipairs(nodes) do
 			local inst = nd.path and resolvePath(nd.path)
 			if inst and not g.byInst[inst] then
-				local e = { inst = inst, order = nd.order or g.counter }
+				local e = { inst = inst, order = nd.order or g.counter, overwrite = nd.overwrite }
 				table.insert(g.entries, e)
 				g.byInst[inst] = e
 				g.counter = math.max(g.counter, (nd.order or 0) + 1)
@@ -352,40 +557,175 @@ local function load()
 		table.insert(groups, g)
 	end
 	activeIndex = data.active or 1
-	if activeIndex < 1 or activeIndex > #groups then
-		activeIndex = 1
-	end
+	if activeIndex < 1 or activeIndex > #groups then activeIndex = 1 end
+	abbrevMode = data.abbrev == true
 end
 
 --============================================================
--- UI construction
+-- Window (draggable CoreGui ScreenGui — no dock overlay)
 --============================================================
 
-local toolbar = plugin:CreateToolbar("Explorer Reference")
-local toggleButton = toolbar:CreateButton("ExplorerReferenceToggle", "Show / hide the Explorer Reference panel", "", "Explorer Ref")
-toggleButton.ClickableWhenViewportHidden = true
+-- Remove any leftover window from a previous load of this plugin
+local prev = CoreGui:FindFirstChild("ExplorerReferenceGui")
+if prev then prev:Destroy() end
 
-local widgetInfo = DockWidgetPluginGuiInfo.new(
-	Enum.InitialDockState.Float,
-	false, -- start closed
-	false,
-	440, 560, -- default size
-	320, 320 -- min size
-)
-local widget = plugin:CreateDockWidgetPluginGui("ExplorerReferencePanel", widgetInfo)
-widget.Title = "Explorer Reference"
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "ExplorerReferenceGui"
+screenGui.DisplayOrder = 1000000 -- above other GUIs
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Enabled = false
+screenGui.Parent = CoreGui
 
-local root = Instance.new("Frame")
-root.Size = UDim2.new(1, 0, 1, 0)
-root.BackgroundColor3 = THEME.bg
-root.BorderSizePixel = 0
-root.Parent = widget
+local window = Instance.new("Frame")
+window.Name = "Window"
+window.Size = UDim2.new(0, 470, 0, 620)
+window.Position = UDim2.new(0, 220, 0, 120)
+window.BackgroundColor3 = THEME.bg
+window.BorderSizePixel = 0
+window.Active = true
+window.Parent = screenGui
+do
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = THEME.border
+	stroke.Thickness = 1
+	stroke.Parent = window
+end
 
---------------------------------------------------------------
--- Helpers for building widgets
---------------------------------------------------------------
+-- Title bar (drag handle)
+local titleBar = Instance.new("Frame")
+titleBar.Name = "TitleBar"
+titleBar.Size = UDim2.new(1, 0, 0, 26)
+titleBar.BackgroundColor3 = THEME.bar
+titleBar.BorderSizePixel = 0
+titleBar.Active = true
+titleBar.Parent = window
 
-local function makeButton(parent, text, tooltip, cb)
+local titleText = Instance.new("TextLabel")
+titleText.BackgroundTransparency = 1
+titleText.Size = UDim2.new(1, -60, 1, 0)
+titleText.Position = UDim2.new(0, 8, 0, 0)
+titleText.Font = Enum.Font.GothamMedium
+titleText.TextSize = 13
+titleText.TextColor3 = THEME.text
+titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.Text = "Explorer Reference"
+titleText.Parent = titleBar
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.AnchorPoint = Vector2.new(1, 0.5)
+closeBtn.Position = UDim2.new(1, -6, 0.5, 0)
+closeBtn.Size = UDim2.new(0, 22, 0, 20)
+closeBtn.BackgroundColor3 = THEME.btn
+closeBtn.BorderSizePixel = 0
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 13
+closeBtn.TextColor3 = THEME.text
+closeBtn.Text = "X"
+closeBtn.AutoButtonColor = true
+closeBtn.Parent = titleBar
+do
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 4)
+	c.Parent = closeBtn
+end
+
+-- Content region below the title bar (everything else lives here)
+local content = Instance.new("Frame")
+content.Name = "Content"
+content.BackgroundTransparency = 1
+content.Position = UDim2.new(0, 0, 0, 26)
+content.Size = UDim2.new(1, 0, 1, -26)
+content.Parent = window
+
+-- Resize grip (bottom-right)
+local resizeGrip = Instance.new("TextButton")
+resizeGrip.AnchorPoint = Vector2.new(1, 1)
+resizeGrip.Position = UDim2.new(1, 0, 1, 0)
+resizeGrip.Size = UDim2.new(0, 16, 0, 16)
+resizeGrip.BackgroundColor3 = THEME.btn
+resizeGrip.BorderSizePixel = 0
+resizeGrip.Text = "//"
+resizeGrip.Font = Enum.Font.GothamBold
+resizeGrip.TextSize = 11
+resizeGrip.TextColor3 = THEME.textDim
+resizeGrip.AutoButtonColor = false
+resizeGrip.ZIndex = 5
+resizeGrip.Parent = window
+
+-- Window geometry persistence
+local function saveWindowPrefs()
+	pcall(function()
+		plugin:SetSetting(WINDOW_KEY, HttpService:JSONEncode({
+			x = window.Position.X.Offset,
+			y = window.Position.Y.Offset,
+			w = window.Size.X.Offset,
+			h = window.Size.Y.Offset,
+		}))
+	end)
+end
+
+local function loadWindowPrefs()
+	local raw = plugin:GetSetting(WINDOW_KEY)
+	if not raw then return end
+	local ok, g = pcall(function() return HttpService:JSONDecode(raw) end)
+	if ok and type(g) == "table" and g.w and g.h then
+		window.Size = UDim2.new(0, math.max(340, g.w), 0, math.max(320, g.h))
+		window.Position = UDim2.new(0, g.x or 220, 0, g.y or 120)
+	end
+end
+
+-- Dragging
+local dragging, dragStart, dragStartPos = false, nil, nil
+titleBar.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = true
+		dragStart = input.Position
+		dragStartPos = window.Position
+	end
+end)
+
+-- Resizing
+local resizing, resizeStart, resizeStartSize = false, nil, nil
+resizeGrip.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		resizing = true
+		resizeStart = input.Position
+		resizeStartSize = window.Size
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+	if dragging then
+		local delta = input.Position - dragStart
+		window.Position = UDim2.new(0, dragStartPos.X.Offset + delta.X, 0, dragStartPos.Y.Offset + delta.Y)
+	elseif resizing then
+		local delta = input.Position - resizeStart
+		local w = math.max(340, resizeStartSize.X.Offset + delta.X)
+		local h = math.max(320, resizeStartSize.Y.Offset + delta.Y)
+		window.Size = UDim2.new(0, w, 0, h)
+		applyLayout()
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		if dragging or resizing then saveWindowPrefs() end
+		dragging = false
+		resizing = false
+	end
+end)
+
+closeBtn.MouseButton1Click:Connect(function()
+	screenGui.Enabled = false
+end)
+
+--============================================================
+-- Widget-building helpers
+--============================================================
+
+local function createBtnVisual(parent, text)
 	local b = Instance.new("TextButton")
 	b.AutoButtonColor = false
 	b.BackgroundColor3 = THEME.btn
@@ -397,8 +737,6 @@ local function makeButton(parent, text, tooltip, cb)
 	b.TextColor3 = THEME.text
 	b.Text = text
 	b.Name = "Btn_" .. text
-	b.AutomaticSize = Enum.AutomaticSize.X
-
 	local pad = Instance.new("UIPadding")
 	pad.PaddingLeft = UDim.new(0, 10)
 	pad.PaddingRight = UDim.new(0, 10)
@@ -406,18 +744,40 @@ local function makeButton(parent, text, tooltip, cb)
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 4)
 	corner.Parent = b
+	b.Parent = parent
+	return b
+end
 
+local function makeButton(parent, text, cb)
+	local b = createBtnVisual(parent, text)
 	b.MouseEnter:Connect(function() b.BackgroundColor3 = THEME.btnHover end)
 	b.MouseLeave:Connect(function() b.BackgroundColor3 = THEME.btn end)
 	b.MouseButton1Click:Connect(function()
 		local ok, err = pcall(cb)
 		if not ok then warn("[ExplorerReference] " .. tostring(err)) end
 	end)
-	b.Parent = parent
 	return b
 end
 
--- A horizontal scrolling strip that holds a row of buttons/tabs
+-- A toggle button that keeps its "on" color even when the cursor leaves.
+local function makeToggle(parent, text, isOn, onClick)
+	local b = createBtnVisual(parent, text)
+	local function paint()
+		b.BackgroundColor3 = isOn() and THEME.rowSel or THEME.btn
+	end
+	b.MouseEnter:Connect(function()
+		if not isOn() then b.BackgroundColor3 = THEME.btnHover end
+	end)
+	b.MouseLeave:Connect(paint)
+	b.MouseButton1Click:Connect(function()
+		local ok, err = pcall(onClick)
+		if not ok then warn("[ExplorerReference] " .. tostring(err)) end
+		paint()
+	end)
+	paint()
+	return b, paint
+end
+
 local function makeStrip(parent, yPos, height)
 	local strip = Instance.new("ScrollingFrame")
 	strip.BackgroundColor3 = THEME.bar
@@ -429,104 +789,173 @@ local function makeStrip(parent, yPos, height)
 	strip.AutomaticCanvasSize = Enum.AutomaticSize.X
 	strip.CanvasSize = UDim2.new(0, 0, 0, 0)
 	strip.Parent = parent
-
 	local layout = Instance.new("UIListLayout")
 	layout.FillDirection = Enum.FillDirection.Horizontal
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
 	layout.VerticalAlignment = Enum.VerticalAlignment.Center
 	layout.Padding = UDim.new(0, 4)
 	layout.Parent = strip
-
 	local pad = Instance.new("UIPadding")
 	pad.PaddingLeft = UDim.new(0, 6)
 	pad.PaddingRight = UDim.new(0, 6)
 	pad.Parent = strip
-
 	return strip
 end
 
---------------------------------------------------------------
--- Top bars
---------------------------------------------------------------
+--============================================================
+-- Layout
+--============================================================
 
-local actionRow = makeStrip(root, 4, 30)
-local tabRow = makeStrip(root, 38, 30)
+local actionRow = makeStrip(content, 4, 28)
+local tabRow = makeStrip(content, 36, 28)
 
--- Status label
-local statusLabel = Instance.new("TextLabel")
-statusLabel.BackgroundColor3 = THEME.bar
-statusLabel.BorderSizePixel = 0
-statusLabel.Size = UDim2.new(1, 0, 0, 20)
-statusLabel.Position = UDim2.new(0, 0, 0, 70)
-statusLabel.Font = Enum.Font.Gotham
-statusLabel.TextSize = 12
-statusLabel.TextColor3 = THEME.textDim
-statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-statusLabel.Text = ""
-statusLabel.Parent = root
-local statusPad = Instance.new("UIPadding")
-statusPad.PaddingLeft = UDim.new(0, 8)
-statusPad.Parent = statusLabel
+-- Group-name row: editable name box (rename) + Del Group
+local nameRow = Instance.new("Frame")
+nameRow.BackgroundColor3 = THEME.bar
+nameRow.BorderSizePixel = 0
+nameRow.Position = UDim2.new(0, 0, 0, 68)
+nameRow.Size = UDim2.new(1, 0, 0, 24)
+nameRow.Parent = content
 
---------------------------------------------------------------
+local nameBox = Instance.new("TextBox")
+nameBox.BackgroundColor3 = THEME.btn
+nameBox.BorderSizePixel = 0
+nameBox.Position = UDim2.new(0, 6, 0, 3)
+nameBox.Size = UDim2.new(1, -86, 0, 18)
+nameBox.Font = Enum.Font.Gotham
+nameBox.TextSize = 12
+nameBox.TextColor3 = THEME.header
+nameBox.TextXAlignment = Enum.TextXAlignment.Left
+nameBox.ClearTextOnFocus = false
+nameBox.Text = ""
+nameBox.PlaceholderText = "group name"
+nameBox.Parent = nameRow
+do
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 4)
+	c.Parent = nameBox
+	local p = Instance.new("UIPadding")
+	p.PaddingLeft = UDim.new(0, 6)
+	p.Parent = nameBox
+end
+
+local delGroupBtn = Instance.new("TextButton")
+delGroupBtn.AnchorPoint = Vector2.new(1, 0)
+delGroupBtn.Position = UDim2.new(1, -6, 0, 3)
+delGroupBtn.Size = UDim2.new(0, 72, 0, 18)
+delGroupBtn.BackgroundColor3 = THEME.btn
+delGroupBtn.BorderSizePixel = 0
+delGroupBtn.Font = Enum.Font.Gotham
+delGroupBtn.TextSize = 12
+delGroupBtn.TextColor3 = THEME.text
+delGroupBtn.Text = "Del Group"
+delGroupBtn.AutoButtonColor = false
+delGroupBtn.Parent = nameRow
+do
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 4)
+	c.Parent = delGroupBtn
+end
+delGroupBtn.MouseEnter:Connect(function() delGroupBtn.BackgroundColor3 = THEME.btnHover end)
+delGroupBtn.MouseLeave:Connect(function() delGroupBtn.BackgroundColor3 = THEME.btn end)
+
 -- Body (node list)
---------------------------------------------------------------
-
 local body = Instance.new("ScrollingFrame")
 body.BackgroundColor3 = THEME.bg
 body.BorderSizePixel = 0
-body.Position = UDim2.new(0, 0, 0, 92)
-body.Size = UDim2.new(1, 0, 1, -92)
+body.Position = UDim2.new(0, 0, 0, 96)
+body.Size = UDim2.new(1, 0, 1, -96)
 body.ScrollBarThickness = 6
 body.ScrollingDirection = Enum.ScrollingDirection.XY
 body.AutomaticCanvasSize = Enum.AutomaticSize.XY
 body.CanvasSize = UDim2.new(0, 0, 0, 0)
-body.Parent = root
+body.Parent = content
+do
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Vertical
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = body
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0, 6)
+	pad.PaddingLeft = UDim.new(0, 6)
+	pad.PaddingBottom = UDim.new(0, 12)
+	pad.Parent = body
+end
 
-local bodyLayout = Instance.new("UIListLayout")
-bodyLayout.FillDirection = Enum.FillDirection.Vertical
-bodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
-bodyLayout.Parent = body
+-- Key panel (bottom, only when abbreviation mode is on)
+local KEY_PANEL_H = 104
+local keyPanel = Instance.new("ScrollingFrame")
+keyPanel.BackgroundColor3 = THEME.bar
+keyPanel.BorderSizePixel = 0
+keyPanel.AnchorPoint = Vector2.new(0, 1)
+keyPanel.Position = UDim2.new(0, 0, 1, 0)
+keyPanel.Size = UDim2.new(1, 0, 0, KEY_PANEL_H)
+keyPanel.ScrollBarThickness = 4
+keyPanel.ScrollingDirection = Enum.ScrollingDirection.Y
+keyPanel.AutomaticCanvasSize = Enum.AutomaticSize.Y
+keyPanel.CanvasSize = UDim2.new(0, 0, 0, 0)
+keyPanel.Visible = false
+keyPanel.Parent = content
 
-local bodyPad = Instance.new("UIPadding")
-bodyPad.PaddingTop = UDim.new(0, 6)
-bodyPad.PaddingLeft = UDim.new(0, 6)
-bodyPad.PaddingBottom = UDim.new(0, 12)
-bodyPad.Parent = body
+local keyLabel = Instance.new("TextLabel")
+keyLabel.BackgroundTransparency = 1
+keyLabel.Size = UDim2.new(1, -12, 0, 0)
+keyLabel.AutomaticSize = Enum.AutomaticSize.Y
+keyLabel.Position = UDim2.new(0, 8, 0, 4)
+keyLabel.Font = Enum.Font.Code
+keyLabel.TextSize = 13
+keyLabel.TextColor3 = THEME.textDim
+keyLabel.TextXAlignment = Enum.TextXAlignment.Left
+keyLabel.TextYAlignment = Enum.TextYAlignment.Top
+keyLabel.Text = ""
+keyLabel.Parent = keyPanel
 
-local bodyRows = {} -- { {inst, button} ... }
+applyLayout = function()
+	if abbrevMode then
+		keyPanel.Visible = true
+		body.Size = UDim2.new(1, 0, 1, -(96 + KEY_PANEL_H + 4))
+	else
+		keyPanel.Visible = false
+		body.Size = UDim2.new(1, 0, 1, -96)
+	end
+end
 
---------------------------------------------------------------
+--============================================================
+-- Overlays (copy + overwrite editor)
+--============================================================
+
+local function makeOverlay()
+	local o = Instance.new("Frame")
+	o.BackgroundColor3 = THEME.bg
+	o.BorderSizePixel = 0
+	o.Position = UDim2.new(0, 0, 0, 26)
+	o.Size = UDim2.new(1, 0, 1, -26)
+	o.Visible = false
+	o.ZIndex = 50
+	o.Parent = window
+	return o
+end
+
 -- Copy overlay
---------------------------------------------------------------
+local copyOverlay = makeOverlay()
+local copyInfo = Instance.new("TextLabel")
+copyInfo.BackgroundColor3 = THEME.bar
+copyInfo.BorderSizePixel = 0
+copyInfo.Size = UDim2.new(1, 0, 0, 26)
+copyInfo.Font = Enum.Font.Gotham
+copyInfo.TextSize = 12
+copyInfo.TextColor3 = THEME.text
+copyInfo.Text = "  Press Ctrl+C to copy, then Close."
+copyInfo.TextXAlignment = Enum.TextXAlignment.Left
+copyInfo.ZIndex = 51
+copyInfo.Parent = copyOverlay
 
-local overlay = Instance.new("Frame")
-overlay.BackgroundColor3 = THEME.bg
-overlay.BorderSizePixel = 0
-overlay.Size = UDim2.new(1, 0, 1, 0)
-overlay.Visible = false
-overlay.ZIndex = 10
-overlay.Parent = root
-
-local overlayInfo = Instance.new("TextLabel")
-overlayInfo.BackgroundColor3 = THEME.bar
-overlayInfo.BorderSizePixel = 0
-overlayInfo.Size = UDim2.new(1, 0, 0, 26)
-overlayInfo.Font = Enum.Font.Gotham
-overlayInfo.TextSize = 12
-overlayInfo.TextColor3 = THEME.text
-overlayInfo.Text = "  Press Ctrl+C to copy, then close."
-overlayInfo.TextXAlignment = Enum.TextXAlignment.Left
-overlayInfo.ZIndex = 11
-overlayInfo.Parent = overlay
-
-local overlayClose = makeButton(overlay, "Close", "Close copy view", function()
-	overlay.Visible = false
-end)
-overlayClose.AnchorPoint = Vector2.new(1, 0)
-overlayClose.Position = UDim2.new(1, -6, 0, 2)
-overlayClose.Size = UDim2.new(0, 0, 0, 22)
-overlayClose.ZIndex = 11
+local copyClose = createBtnVisual(copyOverlay, "Close")
+copyClose.AnchorPoint = Vector2.new(1, 0)
+copyClose.Position = UDim2.new(1, -6, 0, 2)
+copyClose.Size = UDim2.new(0, 0, 0, 22)
+copyClose.ZIndex = 51
+copyClose.MouseButton1Click:Connect(function() copyOverlay.Visible = false end)
 
 local copyBox = Instance.new("TextBox")
 copyBox.BackgroundColor3 = THEME.bg
@@ -544,16 +973,18 @@ copyBox.ClearTextOnFocus = false
 copyBox.TextEditable = true
 copyBox.TextWrapped = false
 copyBox.Text = ""
-copyBox.ZIndex = 11
-copyBox.Parent = overlay
-local copyPad = Instance.new("UIPadding")
-copyPad.PaddingLeft = UDim.new(0, 6)
-copyPad.PaddingTop = UDim.new(0, 4)
-copyPad.Parent = copyBox
+copyBox.ZIndex = 51
+copyBox.Parent = copyOverlay
+do
+	local p = Instance.new("UIPadding")
+	p.PaddingLeft = UDim.new(0, 6)
+	p.PaddingTop = UDim.new(0, 4)
+	p.Parent = copyBox
+end
 
 local function showCopy(text)
 	copyBox.Text = text
-	overlay.Visible = true
+	copyOverlay.Visible = true
 	task.defer(function()
 		copyBox:CaptureFocus()
 		copyBox.CursorPosition = #copyBox.Text + 1
@@ -561,9 +992,77 @@ local function showCopy(text)
 	end)
 end
 
+-- Overwrite editor overlay
+local owOverlay = makeOverlay()
+local owInfo = Instance.new("TextLabel")
+owInfo.BackgroundColor3 = THEME.bar
+owInfo.BorderSizePixel = 0
+owInfo.Size = UDim2.new(1, 0, 0, 26)
+owInfo.Font = Enum.Font.Gotham
+owInfo.TextSize = 12
+owInfo.TextColor3 = THEME.text
+owInfo.Text = "  Overwrite label"
+owInfo.TextXAlignment = Enum.TextXAlignment.Left
+owInfo.ZIndex = 51
+owInfo.Parent = owOverlay
+
+local owBox = Instance.new("TextBox")
+owBox.BackgroundColor3 = THEME.bg
+owBox.BorderColor3 = THEME.border
+owBox.BorderSizePixel = 1
+owBox.Position = UDim2.new(0, 8, 0, 34)
+owBox.Size = UDim2.new(1, -16, 0, 26)
+owBox.Font = Enum.Font.Code
+owBox.TextSize = 14
+owBox.TextColor3 = THEME.text
+owBox.TextXAlignment = Enum.TextXAlignment.Left
+owBox.ClearTextOnFocus = false
+owBox.TextEditable = true
+owBox.Text = ""
+owBox.ZIndex = 51
+owBox.Parent = owOverlay
+do
+	local p = Instance.new("UIPadding")
+	p.PaddingLeft = UDim.new(0, 6)
+	p.Parent = owBox
+end
+
+local owHint = Instance.new("TextLabel")
+owHint.BackgroundTransparency = 1
+owHint.Position = UDim2.new(0, 8, 0, 66)
+owHint.Size = UDim2.new(1, -16, 0, 40)
+owHint.Font = Enum.Font.Gotham
+owHint.TextSize = 11
+owHint.TextColor3 = THEME.textDim
+owHint.TextXAlignment = Enum.TextXAlignment.Left
+owHint.TextYAlignment = Enum.TextYAlignment.Top
+owHint.TextWrapped = true
+owHint.Text = "Edit the label freely. Added text shows red in the list. Apply to keep it, Remove to clear it."
+owHint.ZIndex = 51
+owHint.Parent = owOverlay
+
+local owTarget = nil -- Instance currently being edited
+
+local owApply = createBtnVisual(owOverlay, "Apply")
+owApply.Position = UDim2.new(0, 8, 0, 112)
+owApply.Size = UDim2.new(0, 0, 0, 24)
+owApply.ZIndex = 51
+
+local owRemove = createBtnVisual(owOverlay, "Remove")
+owRemove.Position = UDim2.new(0, 80, 0, 112)
+owRemove.Size = UDim2.new(0, 0, 0, 24)
+owRemove.ZIndex = 51
+
+local owCancel = createBtnVisual(owOverlay, "Cancel")
+owCancel.Position = UDim2.new(0, 170, 0, 112)
+owCancel.Size = UDim2.new(0, 0, 0, 24)
+owCancel.ZIndex = 51
+
 --============================================================
--- Refresh functions
+-- Refresh
 --============================================================
+
+local bodyRows = {}
 
 local function setSelected(inst)
 	selectedInst = inst
@@ -575,23 +1074,13 @@ local function setSelected(inst)
 			row.button.BackgroundTransparency = 1
 		end
 	end
-end
-
-refreshStatus = function()
-	local g = activeGroup()
-	local nodeCount = g and #g.entries or 0
-	local selCount = 0
-	pcall(function() selCount = #Selection:Get() end)
-	local name = g and g.name or "—"
-	statusLabel.Text = string.format("Group '%s'  •  %d nodes  •  %d selected in Studio", name, nodeCount, selCount)
+	if paintOverwrite then paintOverwrite() end
 end
 
 local function clearBody()
 	bodyRows = {}
 	for _, child in ipairs(body:GetChildren()) do
-		if child:IsA("GuiObject") then
-			child:Destroy()
-		end
+		if child:IsA("GuiObject") then child:Destroy() end
 	end
 end
 
@@ -620,7 +1109,6 @@ local function createRow(item, order)
 		return
 	end
 
-	-- service / node row
 	local btn = Instance.new("TextButton")
 	btn.AutoButtonColor = false
 	btn.BackgroundTransparency = 1
@@ -631,7 +1119,8 @@ local function createRow(item, order)
 	btn.Font = Enum.Font.Code
 	btn.TextSize = 14
 	btn.TextXAlignment = Enum.TextXAlignment.Left
-	btn.Text = item.text
+	btn.RichText = item.rich
+	btn.Text = item.displayText
 	btn.LayoutOrder = order
 	if item.kind == "service" then
 		btn.TextColor3 = THEME.service
@@ -640,7 +1129,6 @@ local function createRow(item, order)
 	else
 		btn.TextColor3 = THEME.text
 	end
-
 	local pad = Instance.new("UIPadding")
 	pad.PaddingRight = UDim.new(0, 12)
 	pad.Parent = btn
@@ -653,14 +1141,11 @@ local function createRow(item, order)
 			end
 		end)
 		btn.MouseLeave:Connect(function()
-			if selectedInst ~= item.inst then
-				btn.BackgroundTransparency = 1
-			end
+			if selectedInst ~= item.inst then btn.BackgroundTransparency = 1 end
 		end)
 		btn.MouseButton1Click:Connect(function()
 			setSelected(item.inst)
 			pcall(function() Selection:Set({ item.inst }) end)
-			refreshStatus()
 		end)
 	end
 
@@ -677,67 +1162,145 @@ refreshView = function()
 	for i, item in ipairs(items) do
 		createRow(item, i)
 	end
-	-- reapply highlight if the selected node still exists
-	if selectedInst then
-		setSelected(selectedInst)
+	if selectedInst then setSelected(selectedInst) end
+	-- key panel
+	if abbrevMode then
+		keyLabel.Text = keyBlockText({ g })
 	end
-	refreshStatus()
+	applyLayout()
+end
+
+local function makeTab(parent, group, index, isActive)
+	local b = createBtnVisual(parent, group.name)
+	b.LayoutOrder = index * 10
+	b.TextColor3 = THEME.header -- group tabs are blue
+	local base = isActive and THEME.rowSel or THEME.btn
+	b.BackgroundColor3 = base
+	b.MouseEnter:Connect(function()
+		if not isActive then b.BackgroundColor3 = THEME.btnHover end
+	end)
+	b.MouseLeave:Connect(function() b.BackgroundColor3 = base end)
+	b.MouseButton1Click:Connect(function()
+		activeIndex = index
+		selectedInst = nil
+		save()
+		refreshAll()
+	end)
+	return b
+end
+
+local function makeArrow(parent, text, layoutOrder, cb)
+	local b = createBtnVisual(parent, text)
+	b.LayoutOrder = layoutOrder
+	b.TextColor3 = THEME.text
+	b.MouseEnter:Connect(function() b.BackgroundColor3 = THEME.btnHover end)
+	b.MouseLeave:Connect(function() b.BackgroundColor3 = THEME.btn end)
+	b.MouseButton1Click:Connect(function()
+		local ok, err = pcall(cb)
+		if not ok then warn("[ExplorerReference] " .. tostring(err)) end
+	end)
+	return b
 end
 
 refreshTabs = function()
 	for _, child in ipairs(tabRow:GetChildren()) do
-		if child:IsA("GuiObject") then
-			child:Destroy()
-		end
+		if child:IsA("GuiObject") then child:Destroy() end
 	end
-
 	for i, g in ipairs(groups) do
 		local isActive = (i == activeIndex)
-		local tab = makeButton(tabRow, g.name, "Switch to " .. g.name, function()
-			activeIndex = i
-			selectedInst = nil
-			save()
-			refreshAll()
-		end)
-		tab.LayoutOrder = i
-		if isActive then
-			tab.BackgroundColor3 = THEME.rowSel
-			tab.MouseLeave:Connect(function() tab.BackgroundColor3 = THEME.rowSel end)
+		if isActive and i > 1 then
+			makeArrow(tabRow, "<", i * 10 - 1, function()
+				groups[i], groups[i - 1] = groups[i - 1], groups[i]
+				activeIndex = i - 1
+				save()
+				refreshAll()
+			end)
+		end
+		makeTab(tabRow, g, i, isActive)
+		if isActive and i < #groups then
+			makeArrow(tabRow, ">", i * 10 + 1, function()
+				groups[i], groups[i + 1] = groups[i + 1], groups[i]
+				activeIndex = i + 1
+				save()
+				refreshAll()
+			end)
 		end
 	end
+	local addTab = makeButton(tabRow, "+ Group", function() newGroup() end)
+	addTab.LayoutOrder = (#groups + 1) * 10
+end
 
-	local addTab = makeButton(tabRow, "+ Group", "Create a new group", function()
-		newGroup()
-	end)
-	addTab.LayoutOrder = #groups + 1
+refreshNameBox = function()
+	local g = activeGroup()
+	nameBox.Text = g and g.name or ""
 end
 
 refreshAll = function()
 	refreshTabs()
+	refreshNameBox()
 	refreshView()
-	refreshStatus()
 end
 
 --============================================================
--- Action buttons
+-- Wiring: name box, del group, action buttons
 --============================================================
 
-makeButton(actionRow, "+ Add Selection", "Add the current Explorer selection (and its ancestors) to this group", function()
+nameBox.FocusLost:Connect(function()
+	local g = activeGroup()
+	if g and nameBox.Text ~= "" and nameBox.Text ~= g.name then
+		g.name = nameBox.Text
+		save()
+		refreshTabs()
+	else
+		refreshNameBox()
+	end
+end)
+
+delGroupBtn.MouseButton1Click:Connect(function()
+	if #groups <= 1 then
+		-- clearing the last group = fresh slate
+		groups[1] = { name = "Group 1", entries = {}, byInst = {}, counter = 0 }
+		activeIndex = 1
+	else
+		table.remove(groups, activeIndex)
+		if activeIndex > #groups then activeIndex = #groups end
+	end
+	selectedInst = nil
+	save()
+	refreshAll()
+end)
+
+-- Action row
+makeButton(actionRow, "+ Add Selection", function()
 	local g = activeGroup()
 	if not g then return end
 	local sel = Selection:Get()
 	if #sel == 0 then
-		statusLabel.Text = "Select something in the Explorer first."
+		warn("[ExplorerReference] Select something in the Explorer first.")
 		return
 	end
-	for _, inst in ipairs(sel) do
-		addInstanceChain(g, inst)
-	end
+	for _, inst in ipairs(sel) do addInstanceChain(g, inst) end
 	save()
 	refreshView()
 end)
 
-makeButton(actionRow, "Sync", "Re-read live hierarchy and prune deleted nodes", function()
+do
+	local _, paint = makeToggle(actionRow, "Multi-Select", function() return multiSelect end, function()
+		multiSelect = not multiSelect
+		if multiSelect then
+			-- immediately capture whatever's already selected
+			local g = activeGroup()
+			if g then
+				for _, inst in ipairs(Selection:Get()) do addInstanceChain(g, inst) end
+				save()
+				refreshView()
+			end
+		end
+	end)
+	paintMulti = paint
+end
+
+makeButton(actionRow, "Sync", function()
 	local g = activeGroup()
 	if not g then return end
 	pruneStale(g)
@@ -745,10 +1308,35 @@ makeButton(actionRow, "Sync", "Re-read live hierarchy and prune deleted nodes", 
 	refreshView()
 end)
 
-makeButton(actionRow, "Delete", "Remove the selected node (and its children) from this group", function()
+do
+	local _, paint = makeToggle(actionRow, "Overwrite", function()
+		local g = activeGroup()
+		local e = selectedInst and g and entryFor(g, selectedInst)
+		return e ~= nil and e.overwrite ~= nil and e.overwrite ~= ""
+	end, function()
+		local g = activeGroup()
+		if not g or not selectedInst then
+			warn("[ExplorerReference] Click a node in the list first, then press Overwrite.")
+			return
+		end
+		local e = entryFor(g, selectedInst)
+		if not e then return end
+		owTarget = selectedInst
+		owInfo.Text = "  Overwrite: " .. defaultLabelFull(selectedInst)
+		owBox.Text = (e.overwrite and e.overwrite ~= "") and e.overwrite or defaultLabelFull(selectedInst)
+		owOverlay.Visible = true
+		task.defer(function()
+			owBox:CaptureFocus()
+			owBox.CursorPosition = #owBox.Text + 1
+		end)
+	end)
+	paintOverwrite = paint
+end
+
+makeButton(actionRow, "Delete", function()
 	local g = activeGroup()
 	if not g or not selectedInst then
-		statusLabel.Text = "Click a node in the list first."
+		warn("[ExplorerReference] Click a node in the list first.")
 		return
 	end
 	deleteSubtree(g, selectedInst)
@@ -757,7 +1345,7 @@ makeButton(actionRow, "Delete", "Remove the selected node (and its children) fro
 	refreshView()
 end)
 
-makeButton(actionRow, "Up", "Move selected node up among its siblings", function()
+makeButton(actionRow, "Up", function()
 	local g = activeGroup()
 	if not g or not selectedInst then return end
 	moveNode(g, selectedInst, -1)
@@ -765,7 +1353,7 @@ makeButton(actionRow, "Up", "Move selected node up among its siblings", function
 	refreshView()
 end)
 
-makeButton(actionRow, "Down", "Move selected node down among its siblings", function()
+makeButton(actionRow, "Down", function()
 	local g = activeGroup()
 	if not g or not selectedInst then return end
 	moveNode(g, selectedInst, 1)
@@ -773,99 +1361,90 @@ makeButton(actionRow, "Down", "Move selected node down among its siblings", func
 	refreshView()
 end)
 
-makeButton(actionRow, "Copy", "Copy this group's text", function()
+do
+	local _, paint = makeToggle(actionRow, "Abbrev", function() return abbrevMode end, function()
+		abbrevMode = not abbrevMode
+		save()
+		refreshView()
+	end)
+	paintAbbrev = paint
+end
+
+makeButton(actionRow, "Copy", function()
 	local g = activeGroup()
 	if not g then return end
 	showCopy(groupToText(g))
 end)
 
-makeButton(actionRow, "Copy All", "Copy every group's text", function()
+makeButton(actionRow, "Copy All", function()
 	showCopy(allGroupsToText())
 end)
 
---============================================================
--- Group management buttons (on the tab row area via extra controls)
---============================================================
-
--- Rename field lives on the status bar area for discoverability
-local renameBox = Instance.new("TextBox")
-renameBox.BackgroundColor3 = THEME.btn
-renameBox.BorderSizePixel = 0
-renameBox.AnchorPoint = Vector2.new(1, 0)
-renameBox.Position = UDim2.new(1, -74, 0, 71)
-renameBox.Size = UDim2.new(0, 130, 0, 18)
-renameBox.Font = Enum.Font.Gotham
-renameBox.TextSize = 12
-renameBox.TextColor3 = THEME.text
-renameBox.PlaceholderText = "rename group…"
-renameBox.Text = ""
-renameBox.ClearTextOnFocus = false
-renameBox.Parent = root
-local rnCorner = Instance.new("UICorner")
-rnCorner.CornerRadius = UDim.new(0, 4)
-rnCorner.Parent = renameBox
-local rnPad = Instance.new("UIPadding")
-rnPad.PaddingLeft = UDim.new(0, 6)
-rnPad.Parent = renameBox
-
-renameBox.FocusLost:Connect(function(enter)
+-- Overwrite editor buttons
+local function applyOverwrite()
 	local g = activeGroup()
-	if g and renameBox.Text ~= "" then
-		g.name = renameBox.Text
+	local e = owTarget and g and entryFor(g, owTarget)
+	if e then
+		local txt = owBox.Text
+		if txt == "" or txt == defaultLabelFull(owTarget) then
+			e.overwrite = nil
+		else
+			e.overwrite = txt
+		end
 		save()
-		refreshAll()
+		refreshView()
 	end
-	renameBox.Text = ""
-end)
+	owOverlay.Visible = false
+	if paintOverwrite then paintOverwrite() end
+end
 
-local delGroupBtn = Instance.new("TextButton")
-delGroupBtn.AutoButtonColor = false
-delGroupBtn.BackgroundColor3 = THEME.btn
-delGroupBtn.BorderSizePixel = 0
-delGroupBtn.AnchorPoint = Vector2.new(1, 0)
-delGroupBtn.Position = UDim2.new(1, -6, 0, 71)
-delGroupBtn.Size = UDim2.new(0, 62, 0, 18)
-delGroupBtn.Font = Enum.Font.Gotham
-delGroupBtn.TextSize = 12
-delGroupBtn.TextColor3 = THEME.text
-delGroupBtn.Text = "Del Group"
-delGroupBtn.Parent = root
-local dgCorner = Instance.new("UICorner")
-dgCorner.CornerRadius = UDim.new(0, 4)
-dgCorner.Parent = delGroupBtn
-delGroupBtn.MouseEnter:Connect(function() delGroupBtn.BackgroundColor3 = THEME.btnHover end)
-delGroupBtn.MouseLeave:Connect(function() delGroupBtn.BackgroundColor3 = THEME.btn end)
-delGroupBtn.MouseButton1Click:Connect(function()
-	if #groups <= 1 then
-		statusLabel.Text = "Can't delete the last group."
-		return
+owApply.MouseButton1Click:Connect(applyOverwrite)
+owBox.FocusLost:Connect(function(enter)
+	if enter then applyOverwrite() end
+end)
+owRemove.MouseButton1Click:Connect(function()
+	local g = activeGroup()
+	local e = owTarget and g and entryFor(g, owTarget)
+	if e then
+		e.overwrite = nil
+		save()
+		refreshView()
 	end
-	table.remove(groups, activeIndex)
-	if activeIndex > #groups then activeIndex = #groups end
-	selectedInst = nil
-	save()
-	refreshAll()
+	owOverlay.Visible = false
+	if paintOverwrite then paintOverwrite() end
+end)
+owCancel.MouseButton1Click:Connect(function()
+	owOverlay.Visible = false
 end)
 
 --============================================================
--- Wiring
+-- Toolbar + toggle + selection watcher
 --============================================================
+
+local toolbar = plugin:CreateToolbar("Explorer Reference")
+local toggleButton = toolbar:CreateButton("ExplorerReferenceToggle", "Show / hide the Explorer Reference window", "", "Explorer Ref")
+toggleButton.ClickableWhenViewportHidden = true
 
 toggleButton.Click:Connect(function()
-	widget.Enabled = not widget.Enabled
-end)
-
-widget:GetPropertyChangedSignal("Enabled"):Connect(function()
-	toggleButton:SetActive(widget.Enabled)
-	if widget.Enabled then
-		refreshAll()
-	end
+	screenGui.Enabled = not screenGui.Enabled
+	toggleButton:SetActive(screenGui.Enabled)
+	if screenGui.Enabled then refreshAll() end
 end)
 
 Selection.SelectionChanged:Connect(function()
-	if widget.Enabled then
-		refreshStatus()
+	if not screenGui.Enabled then return end
+	if multiSelect then
+		local g = activeGroup()
+		if g then
+			for _, inst in ipairs(Selection:Get()) do addInstanceChain(g, inst) end
+			save()
+			refreshView()
+		end
 	end
+end)
+
+plugin.Unloading:Connect(function()
+	if screenGui then screenGui:Destroy() end
 end)
 
 --============================================================
@@ -873,7 +1452,7 @@ end)
 --============================================================
 
 load()
-if #groups == 0 then
-	newGroup(true)
-end
+if #groups == 0 then newGroup(true) end
+loadWindowPrefs()
+applyLayout()
 refreshAll()
