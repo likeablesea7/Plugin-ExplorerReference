@@ -1,22 +1,3 @@
---[[ UPDATE LOG
-	v2
-	  Added:   per-experience data separation (stored per game.GameId)
-	           Multi-Select mode (auto-adds items you click in the Explorer)
-	           Overwrite + live red-diff custom node labels
-	           Abbreviated class names + auto key list (toggle)
-	           Tab reordering via the < > arrows on the active tab
-	           Draggable / resizable window
-	  Changed: dock widget -> draggable CoreGui window (no docking overlay;
-	           clears the deprecated CreateDockWidgetPluginGui warning)
-	           group tabs colored blue; active tab stays highlighted on hover-off
-	           renaming a group is now the inline name TextBox
-	           deleting the last group clears it instead of being blocked
-	  Removed: the status / detail text line
-	v1
-	  Initial prototype: groups, Add Selection (+ancestors), live-synced tree,
-	  click/select/delete/move nodes, Copy / Copy All, basic persistence.
---]]
-
 --[[
 	Explorer Reference  —  v2
 	------------------------------------------------------------------
@@ -205,11 +186,11 @@ end
 
 -- Return `edited` as RichText, with characters that aren't part of the
 -- longest common subsequence with `original` wrapped in red.
-local function diffRich(original, edited)
+local function diffRich(original: string, edited: string): string
+	local n, m = #original, #edited
 	local o, e = {}, {}
-	for i = 1, #original do o[i] = original:sub(i, i) end
-	for i = 1, #edited do e[i] = edited:sub(i, i) end
-	local n, m = #o, #e
+	for i = 1, n do o[i] = original:sub(i, i) end
+	for i = 1, m do e[i] = edited:sub(i, i) end
 
 	local dp = {}
 	for i = 0, n do
