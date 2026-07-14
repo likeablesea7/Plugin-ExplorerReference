@@ -57,11 +57,23 @@ local CLASS_ABBREV = {
 	SpecialMesh = "SM", BlockMesh = "BM", CylinderMesh = "CM",
 }
 
+-- Per-ClassName text color for node names. Anything not listed uses THEME.text.
+local CLASS_COLOR = {
+	ScrollingFrame = Color3.fromRGB(150, 225, 160), -- light green
+	TextButton     = Color3.fromRGB(120, 200, 140), -- green
+	ImageButton    = Color3.fromRGB(120, 200, 140), -- green
+	Frame          = Color3.fromRGB(235, 165, 95),  -- orange
+	LocalScript    = Color3.fromRGB(130, 200, 240), -- light blue
+	TextLabel      = Color3.fromRGB(100, 150, 245), -- blue
+	ImageLabel     = Color3.fromRGB(100, 150, 245), -- blue
+	ScreenGui      = Color3.fromRGB(100, 150, 245), -- blue
+}
+
 --============================================================
 -- State
 --============================================================
 
--- group: { name, entries = { {inst, order, detail}... }, byInst = {[Instance]=entry}, counter }
+-- group: { name, entries = { {inst, order, detail, padded}... }, byInst = {[Instance]=entry}, counter }
 local groups = {}
 local activeIndex = 1
 local selectedInst = nil
@@ -70,7 +82,7 @@ local abbrevMode = false
 
 -- forward declarations
 local refreshAll, refreshView, refreshTabs, refreshNameBox, save
-local paintMulti, paintAbbrev, paintOverwrite
+local paintMulti, paintAbbrev, paintOverwrite, paintPad
 local applyLayout
 
 --============================================================
@@ -221,6 +233,9 @@ local function buildItems(group)
 
 	local function dfs(entry, depth)
 		local inst = entry.inst
+		if entry.padded then
+			table.insert(items, { kind = "blank" }) -- Pad: empty line above this node
+		end
 		local prefix = string.rep(INDENT, depth)
 		local svc = isService(inst)
 		local copyText, displayText, rich
@@ -266,7 +281,9 @@ local function buildItems(group)
 	end
 
 	for idx, root in ipairs(roots) do
-		if idx > 1 then table.insert(items, { kind = "blank" }) end
+		-- separate main branches with a blank line (skip if the root is padded,
+		-- since dfs already inserts one for it)
+		if idx > 1 and not root.padded then table.insert(items, { kind = "blank" }) end
 		dfs(root, 0)
 	end
 	return items
@@ -422,7 +439,7 @@ save = function()
 		for _, e in ipairs(g.entries) do
 			local path = pathOf(e.inst)
 			if path then
-				table.insert(gg.nodes, { path = path, order = e.order, detail = e.detail })
+				table.insert(gg.nodes, { path = path, order = e.order, detail = e.detail, padded = e.padded })
 			end
 		end
 		table.insert(data.groups, gg)
@@ -457,7 +474,7 @@ local function load()
 		for _, nd in ipairs(nodes) do
 			local inst = nd.path and resolvePath(nd.path)
 			if inst and not g.byInst[inst] then
-				local e = { inst = inst, order = nd.order or g.counter, detail = nd.detail }
+				local e = { inst = inst, order = nd.order or g.counter, detail = nd.detail, padded = nd.padded }
 				table.insert(g.entries, e)
 				g.byInst[inst] = e
 				g.counter = math.max(g.counter, (nd.order or 0) + 1)
@@ -873,6 +890,7 @@ local function setSelected(inst)
 		end
 	end
 	if paintOverwrite then paintOverwrite() end
+	if paintPad then paintPad() end
 end
 
 local function clearBody()
@@ -920,10 +938,11 @@ local function createRow(item, order)
 	btn.RichText = item.rich
 	btn.Text = item.displayText
 	btn.LayoutOrder = order
-	if item.kind == "service" then
-		btn.TextColor3 = THEME.service
-	elseif item.detached then
+	if item.detached then
 		btn.TextColor3 = THEME.textDim
+	elseif item.inst and item.kind ~= "service" then
+		-- color node names by ClassName (services stay default white)
+		btn.TextColor3 = CLASS_COLOR[safeClass(item.inst)] or THEME.text
 	else
 		btn.TextColor3 = THEME.text
 	end
@@ -1159,6 +1178,26 @@ makeButton(actionRow, "Down", function()
 	save()
 	refreshView()
 end)
+
+do
+	local _, paint = makeToggle(actionRow, "Pad", function()
+		local g = activeGroup()
+		local e = selectedInst and g and entryFor(g, selectedInst)
+		return e ~= nil and e.padded == true
+	end, function()
+		local g = activeGroup()
+		if not g or not selectedInst then
+			warn("[ExplorerReference] Click a node in the list first, then press Pad.")
+			return
+		end
+		local e = entryFor(g, selectedInst)
+		if not e then return end
+		e.padded = not e.padded
+		save()
+		refreshView()
+	end)
+	paintPad = paint
+end
 
 do
 	local _, paint = makeToggle(actionRow, "Abbrev", function() return abbrevMode end, function()
