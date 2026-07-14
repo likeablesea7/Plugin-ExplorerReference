@@ -1,43 +1,3 @@
---[[
-	Explorer Reference  —  v2
-	------------------------------------------------------------------
-	A Roblox Studio plugin for generating clean, copy-pasteable text
-	references of your Explorer hierarchy (great for handing structure
-	context to an AI).
-
-	How it works
-	------------
-	  * Work is organized into GROUPS (the tabs across the top).
-	  * Select instance(s) in the Explorer, hit "Add Selection", and the
-	    plugin whitelists them PLUS their whole ancestor chain up to the
-	    service, then draws the tree with correct indentation.
-	  * The tree is rebuilt from LIVE parent data every refresh, so if you
-	    move / rename / reparent something in Studio and hit "Sync", the
-	    indentation fixes itself automatically. No more hand-editing markers.
-	  * Click a node to select it (also selects it in Studio). Then you can
-	    Delete it, Move it Up / Down, or Overwrite its label.
-	  * "Copy" / "Copy All" open a select-all textbox you Ctrl+C from
-	    (Studio plugins can't write the clipboard directly).
-
-	v2 additions
-	------------
-	  * Per-experience data: groups are stored keyed by game.GameId, so
-	    different games never share or overwrite each other's references.
-	  * Multi-Select mode: toggle on to auto-add every element you click in
-	    the Explorer.
-	  * Overwrite: give any node a custom label; the characters you added vs
-	    the real "Name (ClassName)" show up red as a live diff. Survives
-	    Sync / move / rename until you remove it. Copy uses the overwrite.
-	  * Abbreviated class names ((F) instead of (Frame)) with an auto key
-	    list, toggleable.
-	  * Draggable/resizable window (in CoreGui, always on top) instead of a
-	    dock widget — no more docking overlay.
-	  * Tab reordering via the < > arrows on the active tab.
-
-	Output format: 2-space indentation, `Name (ClassName)` per line,
-	`---- GroupName ----` section headers. Change INDENT below to taste.
---]]
-
 if not plugin then
 	return
 end
@@ -104,7 +64,7 @@ local CLASS_ABBREV = {
 -- State
 --============================================================
 
--- group: { name, entries = { {inst, order, overwrite}... }, byInst = {[Instance]=entry}, counter }
+-- group: { name, entries = { {inst, order, detail}... }, byInst = {[Instance]=entry}, counter }
 local groups = {}
 local activeIndex = 1
 local selectedInst = nil
@@ -174,66 +134,19 @@ local function displayLabel(inst)
 end
 
 --============================================================
--- RichText diff (for overwrites)
+-- RichText helpers (for the appended "detail" on a node)
 --============================================================
 
-local function escapeRich(s)
+local function escapeRich(s: string): string
 	s = s:gsub("&", "&amp;")
 	s = s:gsub("<", "&lt;")
 	s = s:gsub(">", "&gt;")
 	return s
 end
 
--- Return `edited` as RichText, with characters that aren't part of the
--- longest common subsequence with `original` wrapped in red.
-local function diffRich(original: string, edited: string): string
-	local n, m = #original, #edited
-	local o, e = {}, {}
-	for i = 1, n do o[i] = original:sub(i, i) end
-	for i = 1, m do e[i] = edited:sub(i, i) end
-
-	local dp = {}
-	for i = 0, n do
-		dp[i] = {}
-		for j = 0, m do dp[i][j] = 0 end
-	end
-	for i = 1, n do
-		for j = 1, m do
-			if o[i] == e[j] then
-				dp[i][j] = dp[i - 1][j - 1] + 1
-			else
-				dp[i][j] = math.max(dp[i - 1][j], dp[i][j - 1])
-			end
-		end
-	end
-
-	local matched = {}
-	local i, j = n, m
-	while i > 0 and j > 0 do
-		if o[i] == e[j] then
-			matched[j] = true
-			i, j = i - 1, j - 1
-		elseif dp[i - 1][j] >= dp[i][j - 1] then
-			i = i - 1
-		else
-			j = j - 1
-		end
-	end
-
-	local out = {}
-	local k = 1
-	while k <= m do
-		if matched[k] then
-			local run = {}
-			while k <= m and matched[k] do table.insert(run, e[k]); k = k + 1 end
-			table.insert(out, escapeRich(table.concat(run)))
-		else
-			local run = {}
-			while k <= m and not matched[k] do table.insert(run, e[k]); k = k + 1 end
-			table.insert(out, '<font color="' .. DIFF_COLOR .. '">' .. escapeRich(table.concat(run)) .. "</font>")
-		end
-	end
-	return table.concat(out)
+-- RichText for "base detail": the base label plain, the appended detail red.
+local function detailRich(base: string, detail: string): string
+	return escapeRich(base) .. " " .. '<font color="' .. DIFF_COLOR .. '">' .. escapeRich(detail) .. "</font>"
 end
 
 --============================================================
@@ -259,7 +172,7 @@ local function addInstanceChain(group, inst)
 	end
 	for _, node in ipairs(chain) do
 		if not group.byInst[node] then
-			local e = { inst = node, order = group.counter, overwrite = nil }
+			local e = { inst = node, order = group.counter, detail = nil }
 			group.counter += 1
 			table.insert(group.entries, e)
 			group.byInst[node] = e
@@ -314,14 +227,14 @@ local function buildItems(group)
 		local prefix = string.rep(INDENT, depth)
 		local svc = isService(inst)
 		local copyText, displayText, rich
+		local base = displayLabel(inst) -- abbreviates when abbrev mode is on
 
-		if entry.overwrite and entry.overwrite ~= "" then
-			copyText = prefix .. entry.overwrite
-			displayText = prefix .. diffRich(defaultLabelFull(inst), entry.overwrite)
+		if entry.detail and entry.detail ~= "" then
+			copyText = prefix .. base .. " " .. entry.detail
+			displayText = prefix .. detailRich(base, entry.detail)
 			rich = true
 		else
-			local label = displayLabel(inst)
-			copyText = prefix .. label
+			copyText = prefix .. base
 			displayText = copyText
 			rich = false
 		end
@@ -362,14 +275,13 @@ local function buildItems(group)
 	return items
 end
 
--- Distinct classes used by non-overwritten nodes across a list of groups,
--- limited to those that actually have an abbreviation.
+-- Distinct classes (with an abbreviation) used by nodes across the groups.
 local function collectAbbrevKeys(groupList)
 	local seen = {}
 	local order = {}
 	for _, g in ipairs(groupList) do
 		for _, e in ipairs(g.entries) do
-			if not (e.overwrite and e.overwrite ~= "") and not isService(e.inst) then
+			if not isService(e.inst) then
 				local cn = safeClass(e.inst)
 				local ab = CLASS_ABBREV[cn]
 				if ab and not seen[cn] then
@@ -513,7 +425,7 @@ save = function()
 		for _, e in ipairs(g.entries) do
 			local path = pathOf(e.inst)
 			if path then
-				table.insert(gg.nodes, { path = path, order = e.order, overwrite = e.overwrite })
+				table.insert(gg.nodes, { path = path, order = e.order, detail = e.detail })
 			end
 		end
 		table.insert(data.groups, gg)
@@ -548,7 +460,7 @@ local function load()
 		for _, nd in ipairs(nodes) do
 			local inst = nd.path and resolvePath(nd.path)
 			if inst and not g.byInst[inst] then
-				local e = { inst = inst, order = nd.order or g.counter, overwrite = nd.overwrite }
+				local e = { inst = inst, order = nd.order or g.counter, detail = nd.detail }
 				table.insert(g.entries, e)
 				g.byInst[inst] = e
 				g.counter = math.max(g.counter, (nd.order or 0) + 1)
@@ -577,8 +489,14 @@ screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Enabled = false
 screenGui.Parent = CoreGui
 
-local window = Instance.new("Frame")
+-- The window is a TextButton (not a Frame): a GuiButton reliably sinks mouse
+-- input, so clicks/drags anywhere over the window are absorbed instead of
+-- passing through to the Studio viewport (no accidental selecting/camera moves).
+local window = Instance.new("TextButton")
 window.Name = "Window"
+window.Text = ""
+window.AutoButtonColor = false
+window.Selectable = false
 window.Size = UDim2.new(0, 470, 0, 620)
 window.Position = UDim2.new(0, 220, 0, 120)
 window.BackgroundColor3 = THEME.bg
@@ -928,6 +846,7 @@ local function makeOverlay()
 	local o = Instance.new("Frame")
 	o.BackgroundColor3 = THEME.bg
 	o.BorderSizePixel = 0
+	o.Active = true -- sink input so the node list underneath isn't clickable
 	o.Position = UDim2.new(0, 0, 0, 26)
 	o.Size = UDim2.new(1, 0, 1, -26)
 	o.Visible = false
@@ -992,29 +911,55 @@ local function showCopy(text)
 	end)
 end
 
--- Overwrite editor overlay
+-- Overwrite editor overlay: appends an editable "detail" to a node's label.
+-- The base label stays unchangeable (and still abbreviates); the detail you
+-- type is appended and shown red in the list.
 local owOverlay = makeOverlay()
+
 local owInfo = Instance.new("TextLabel")
 owInfo.BackgroundColor3 = THEME.bar
 owInfo.BorderSizePixel = 0
-owInfo.Size = UDim2.new(1, 0, 0, 26)
-owInfo.Font = Enum.Font.Gotham
-owInfo.TextSize = 12
+owInfo.Size = UDim2.new(1, 0, 0, 30)
+owInfo.Font = Enum.Font.GothamMedium
+owInfo.TextSize = 13
 owInfo.TextColor3 = THEME.text
-owInfo.Text = "  Overwrite label"
+owInfo.Text = "   Overwrite - add detail to a node"
 owInfo.TextXAlignment = Enum.TextXAlignment.Left
 owInfo.ZIndex = 51
 owInfo.Parent = owOverlay
 
+-- Read-only base label the detail is attached to (cannot be edited)
+local owBaseLabel = Instance.new("TextLabel")
+owBaseLabel.BackgroundColor3 = THEME.bg
+owBaseLabel.BorderColor3 = THEME.border
+owBaseLabel.BorderSizePixel = 1
+owBaseLabel.Position = UDim2.new(0, 8, 0, 40)
+owBaseLabel.Size = UDim2.new(1, -16, 0, 24)
+owBaseLabel.Font = Enum.Font.Code
+owBaseLabel.TextSize = 14
+owBaseLabel.TextColor3 = THEME.textDim
+owBaseLabel.TextXAlignment = Enum.TextXAlignment.Left
+owBaseLabel.Text = ""
+owBaseLabel.ZIndex = 51
+owBaseLabel.Parent = owOverlay
+do
+	local p = Instance.new("UIPadding")
+	p.PaddingLeft = UDim.new(0, 6)
+	p.Parent = owBaseLabel
+end
+
+-- Editable detail (appended to the base; shown red)
 local owBox = Instance.new("TextBox")
 owBox.BackgroundColor3 = THEME.bg
 owBox.BorderColor3 = THEME.border
 owBox.BorderSizePixel = 1
-owBox.Position = UDim2.new(0, 8, 0, 34)
+owBox.Position = UDim2.new(0, 8, 0, 70)
 owBox.Size = UDim2.new(1, -16, 0, 26)
 owBox.Font = Enum.Font.Code
 owBox.TextSize = 14
-owBox.TextColor3 = THEME.text
+owBox.TextColor3 = Color3.fromRGB(255, 107, 107)
+owBox.PlaceholderText = "additional detail, e.g. (Offset: -Y , 0)"
+owBox.PlaceholderColor3 = THEME.textDim
 owBox.TextXAlignment = Enum.TextXAlignment.Left
 owBox.ClearTextOnFocus = false
 owBox.TextEditable = true
@@ -1027,34 +972,20 @@ do
 	p.Parent = owBox
 end
 
-local owHint = Instance.new("TextLabel")
-owHint.BackgroundTransparency = 1
-owHint.Position = UDim2.new(0, 8, 0, 66)
-owHint.Size = UDim2.new(1, -16, 0, 40)
-owHint.Font = Enum.Font.Gotham
-owHint.TextSize = 11
-owHint.TextColor3 = THEME.textDim
-owHint.TextXAlignment = Enum.TextXAlignment.Left
-owHint.TextYAlignment = Enum.TextYAlignment.Top
-owHint.TextWrapped = true
-owHint.Text = "Edit the label freely. Added text shows red in the list. Apply to keep it, Remove to clear it."
-owHint.ZIndex = 51
-owHint.Parent = owOverlay
-
 local owTarget = nil -- Instance currently being edited
 
 local owApply = createBtnVisual(owOverlay, "Apply")
-owApply.Position = UDim2.new(0, 8, 0, 112)
+owApply.Position = UDim2.new(0, 8, 0, 106)
 owApply.Size = UDim2.new(0, 0, 0, 24)
 owApply.ZIndex = 51
 
 local owRemove = createBtnVisual(owOverlay, "Remove")
-owRemove.Position = UDim2.new(0, 80, 0, 112)
+owRemove.Position = UDim2.new(0, 80, 0, 106)
 owRemove.Size = UDim2.new(0, 0, 0, 24)
 owRemove.ZIndex = 51
 
 local owCancel = createBtnVisual(owOverlay, "Cancel")
-owCancel.Position = UDim2.new(0, 170, 0, 112)
+owCancel.Position = UDim2.new(0, 170, 0, 106)
 owCancel.Size = UDim2.new(0, 0, 0, 24)
 owCancel.ZIndex = 51
 
@@ -1251,6 +1182,7 @@ nameBox.FocusLost:Connect(function()
 		g.name = nameBox.Text
 		save()
 		refreshTabs()
+		refreshView() -- update the group header shown in the node list
 	else
 		refreshNameBox()
 	end
@@ -1312,7 +1244,7 @@ do
 	local _, paint = makeToggle(actionRow, "Overwrite", function()
 		local g = activeGroup()
 		local e = selectedInst and g and entryFor(g, selectedInst)
-		return e ~= nil and e.overwrite ~= nil and e.overwrite ~= ""
+		return e ~= nil and e.detail ~= nil and e.detail ~= ""
 	end, function()
 		local g = activeGroup()
 		if not g or not selectedInst then
@@ -1322,8 +1254,8 @@ do
 		local e = entryFor(g, selectedInst)
 		if not e then return end
 		owTarget = selectedInst
-		owInfo.Text = "  Overwrite: " .. defaultLabelFull(selectedInst)
-		owBox.Text = (e.overwrite and e.overwrite ~= "") and e.overwrite or defaultLabelFull(selectedInst)
+		owBaseLabel.Text = defaultLabelFull(selectedInst)
+		owBox.Text = (e.detail and e.detail ~= "") and e.detail or ""
 		owOverlay.Visible = true
 		task.defer(function()
 			owBox:CaptureFocus()
@@ -1386,11 +1318,7 @@ local function applyOverwrite()
 	local e = owTarget and g and entryFor(g, owTarget)
 	if e then
 		local txt = owBox.Text
-		if txt == "" or txt == defaultLabelFull(owTarget) then
-			e.overwrite = nil
-		else
-			e.overwrite = txt
-		end
+		e.detail = (txt ~= "") and txt or nil
 		save()
 		refreshView()
 	end
@@ -1406,7 +1334,7 @@ owRemove.MouseButton1Click:Connect(function()
 	local g = activeGroup()
 	local e = owTarget and g and entryFor(g, owTarget)
 	if e then
-		e.overwrite = nil
+		e.detail = nil
 		save()
 		refreshView()
 	end
