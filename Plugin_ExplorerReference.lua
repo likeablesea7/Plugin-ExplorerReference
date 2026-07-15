@@ -48,10 +48,10 @@ end
 -- Curated class-name abbreviations. Anything not here keeps its full name.
 -- Values are unique so the generated key is unambiguous.
 local CLASS_ABBREV = {
-	ScreenGui = "SG", SurfaceGui = "SuG", BillboardGui = "BG",
+	ScreenGui = "SGui", SurfaceGui = "SuG", BillboardGui = "BG",
 	Frame = "F", ScrollingFrame = "SF", CanvasGroup = "CG",
-	TextButton = "TB", TextLabel = "TL", TextBox = "TX",
-	ImageButton = "IB", ImageLabel = "IL", ViewportFrame = "VF", VideoFrame = "VdF",
+	TextButton = "TB", TextLabel = "TxtL", TextBox = "TBox",
+	ImageButton = "IB", ImageLabel = "ImgL", ViewportFrame = "VF", VideoFrame = "VdF",
 	Folder = "Fol", Configuration = "Cfg",
 	LocalScript = "LS", Script = "Scr", ModuleScript = "MS",
 	Part = "Prt", MeshPart = "MP", UnionOperation = "Un", Model = "Mdl",
@@ -78,8 +78,8 @@ local CLASS_ABBREV = {
 -- Per-ClassName color (hex, for RichText) applied to only the (ClassName) part
 -- of a node's label. Anything not listed keeps the default text color.
 local CLASS_COLOR = {
-	ScrollingFrame = "#EA5A40", -- red (redder than Frame's orange)
-	TextBox        = "#EA5A40", -- red (same as ScrollingFrame)
+	ScrollingFrame = "#8FE6A8", -- light green
+	TextBox        = "#8FE6A8", -- light green (same as ScrollingFrame)
 	TextButton     = "#45C46A", -- green
 	ImageButton    = "#45C46A", -- green
 	Frame          = "#F0913C", -- orange
@@ -559,7 +559,7 @@ local widgetInfo = DockWidgetPluginGuiInfo.new(
 	Enum.InitialDockState.Float,
 	false, -- start closed
 	false, -- do not override the previously saved enabled state
-	470, 620, -- default float size
+	470, 820, -- default float size
 	320, 320 -- minimum size
 )
 
