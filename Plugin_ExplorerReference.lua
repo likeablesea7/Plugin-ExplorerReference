@@ -489,24 +489,58 @@ local function dataKey()
 	return DATA_KEY_BASE .. "_" .. tostring(game.GameId)
 end
 
+-- Which occurrence this instance is among siblings sharing its exact name.
+-- Lets us tell duplicated / same-named siblings apart across save/load (live
+-- Instance references already distinguish them in memory, but paths don't).
+local function siblingIndex(inst)
+	local p = safeParent(inst)
+	if not p then return 1 end
+	local nm = safeName(inst)
+	local ok, kids = pcall(function() return p:GetChildren() end)
+	if not ok then return 1 end
+	local idx = 0
+	for _, c in ipairs(kids) do
+		if safeName(c) == nm then
+			idx += 1
+			if c == inst then return idx end
+		end
+	end
+	return idx > 0 and idx or 1
+end
+
+-- Path segment: { n = name, i = same-name sibling index }.
 local function pathOf(inst)
-	local names = {}
+	local segs = {}
 	local n = inst
 	while n and n ~= game do
-		table.insert(names, 1, safeName(n))
+		table.insert(segs, 1, { n = safeName(n), i = siblingIndex(n) })
 		if safeParent(n) == game then break end
 		n = safeParent(n)
 	end
-	if #names == 0 then return nil end
-	return names
+	if #segs == 0 then return nil end
+	return segs
 end
 
 local function resolvePath(path)
 	local n = game
-	for _, name in ipairs(path) do
-		local ok, child = pcall(function() return n:FindFirstChild(name) end)
-		if not ok or not child then return nil end
-		n = child
+	for _, seg in ipairs(path) do
+		local name, idx
+		if type(seg) == "table" then
+			name, idx = seg.n, seg.i or 1
+		else
+			name, idx = seg, 1 -- legacy path (plain name string)
+		end
+		local ok, kids = pcall(function() return n:GetChildren() end)
+		if not ok then return nil end
+		local count, found = 0, nil
+		for _, c in ipairs(kids) do
+			if safeName(c) == name then
+				count += 1
+				if count == idx then found = c break end
+			end
+		end
+		if not found then return nil end
+		n = found
 	end
 	return n
 end
