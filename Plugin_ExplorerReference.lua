@@ -78,8 +78,8 @@ local CLASS_ABBREV = {
 -- Per-ClassName color (hex, for RichText) applied to only the (ClassName) part
 -- of a node's label. Anything not listed keeps the default text color.
 local CLASS_COLOR = {
-	ScrollingFrame = "#8FE6A8", -- light green
-	TextBox        = "#8FE6A8", -- light green (same as ScrollingFrame)
+	ScrollingFrame = "#EA5A40", -- red (redder than Frame's orange)
+	TextBox        = "#EA5A40", -- red (same as ScrollingFrame)
 	TextButton     = "#45C46A", -- green
 	ImageButton    = "#45C46A", -- green
 	Frame          = "#F0913C", -- orange
@@ -88,6 +88,7 @@ local CLASS_COLOR = {
 	ImageLabel     = "#6496F5", -- blue
 	ScreenGui      = "#6496F5", -- blue
 	UIStroke       = "#6496F5", -- blue (same as ImageLabel/TextLabel)
+	UIGradient     = "#6496F5", -- blue (same as ImageLabel/TextLabel)
 }
 
 --============================================================
