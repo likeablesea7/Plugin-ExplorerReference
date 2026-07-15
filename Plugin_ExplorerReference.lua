@@ -89,7 +89,23 @@ local CLASS_COLOR = {
 	ScreenGui      = "#6496F5", -- blue
 	UIStroke       = "#6496F5", -- blue (same as ImageLabel/TextLabel)
 	UIGradient     = "#6496F5", -- blue (same as ImageLabel/TextLabel)
+	Part           = "#B8DFFF", -- super light blue
+	Attachment     = "#6496F5", -- blue
+	Weld           = "#86D9FF", -- light blue
+	Model          = "#D08BE0", -- pinkish-purple
+	Folder         = "#E6C763", -- folder yellow
 }
+
+-- Any mechanical constraint class (HingeConstraint, SpringConstraint, ...).
+local CONSTRAINT_COLOR = "#8A8F98" -- dark-ish grey
+
+-- Resolve the (hex) color for a class name, or nil for the default.
+local function classColor(cn)
+	local c = CLASS_COLOR[cn]
+	if c then return c end
+	if cn:match("Constraint$") then return CONSTRAINT_COLOR end
+	return nil
+end
 
 --============================================================
 -- State
@@ -166,23 +182,24 @@ local function escapeRich(s: string): string
 	return s
 end
 
--- Build a node's base label in plain and RichText forms (honoring abbrev mode).
--- Rich form keeps the Name in the default color and colors only the (ClassName).
--- Returns: plain, rich, isNode (false for services).
+-- Build a node's label forms.
+--  * plain: always the FULL "Name (ClassName)" (used for copy — never abbreviated)
+--  * rich: display form honoring abbrev mode, with only the (ClassName) colored
+-- Returns: plainFull, rich, isNode (false for services).
 local function nodeLabels(inst)
 	local nameStr = safeName(inst)
 	if isService(inst) then
 		return nameStr, escapeRich(nameStr), false
 	end
 	local cn = safeClass(inst)
+	local plainFull = nameStr .. " (" .. cn .. ")"
 	local shown = (abbrevMode and CLASS_ABBREV[cn]) or cn
-	local plain = nameStr .. " (" .. shown .. ")"
 	local classTxt = "(" .. escapeRich(shown) .. ")"
-	local hex = CLASS_COLOR[cn]
+	local hex = classColor(cn)
 	if hex then
 		classTxt = '<font color="' .. hex .. '">' .. classTxt .. "</font>"
 	end
-	return plain, escapeRich(nameStr) .. " " .. classTxt, true
+	return plainFull, escapeRich(nameStr) .. " " .. classTxt, true
 end
 
 --============================================================
@@ -395,20 +412,13 @@ local function groupToText(group)
 			table.insert(lines, it.copyText)
 		end
 	end
-	local text = table.concat(lines, "\n")
-	if abbrevMode then
-		local key = keyBlockText({ group })
-		if key ~= "" then
-			text = text .. "\n\n" .. key
-		end
-	end
-	return text
+	-- Copy is always un-abbreviated (copyText is the full label), so no key list.
+	return table.concat(lines, "\n")
 end
 
 local function allGroupsToText()
 	local blocks = {}
 	for _, g in ipairs(groups) do
-		-- temporarily strip per-group key; add one combined key at the end
 		local items = buildItems(g)
 		local lines = {}
 		for _, it in ipairs(items) do
@@ -422,14 +432,7 @@ local function allGroupsToText()
 		end
 		table.insert(blocks, table.concat(lines, "\n"))
 	end
-	local text = table.concat(blocks, "\n\n\n")
-	if abbrevMode then
-		local key = keyBlockText(groups)
-		if key ~= "" then
-			text = text .. "\n\n\n" .. key
-		end
-	end
-	return text
+	return table.concat(blocks, "\n\n\n")
 end
 
 local function deleteSubtree(group, inst)
