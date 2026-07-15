@@ -87,6 +87,7 @@ local CLASS_COLOR = {
 	TextLabel      = "#6496F5", -- blue
 	ImageLabel     = "#6496F5", -- blue
 	ScreenGui      = "#6496F5", -- blue
+	UIStroke       = "#6496F5", -- blue (same as ImageLabel/TextLabel)
 }
 
 --============================================================
