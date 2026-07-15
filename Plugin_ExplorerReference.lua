@@ -52,7 +52,7 @@ local CLASS_ABBREV = {
 	Frame = "F", ScrollingFrame = "SF", CanvasGroup = "CG",
 	TextButton = "TB", TextLabel = "TxtL", TextBox = "TBox",
 	ImageButton = "IB", ImageLabel = "ImgL", ViewportFrame = "VF", VideoFrame = "VdF",
-	Folder = "Fol", Configuration = "Cfg",
+	Folder = "Fol", Configuration = "Cfg", StarterPlayerScripts = "SPS",
 	LocalScript = "LS", Script = "Scr", ModuleScript = "MS",
 	Part = "Prt", MeshPart = "MP", UnionOperation = "Un", Model = "Mdl",
 	WedgePart = "WP", TrussPart = "TP", CornerWedgePart = "CWP",
@@ -75,6 +75,17 @@ local CLASS_ABBREV = {
 	SpecialMesh = "SM", BlockMesh = "BM", CylinderMesh = "CM",
 }
 
+-- Abbreviation for a class name: curated first, then a capital-letter fallback
+-- for any *Constraint class (e.g. NoCollisionConstraint -> NCC).
+local function classAbbrev(cn)
+	local a = CLASS_ABBREV[cn]
+	if a then return a end
+	if cn:match("Constraint$") then
+		return (cn:gsub("[^A-Z]", ""))
+	end
+	return nil
+end
+
 -- Per-ClassName color (hex, for RichText) applied to only the (ClassName) part
 -- of a node's label. Anything not listed keeps the default text color.
 local CLASS_COLOR = {
@@ -89,15 +100,16 @@ local CLASS_COLOR = {
 	ScreenGui      = "#6496F5", -- blue
 	UIStroke       = "#6496F5", -- blue (same as ImageLabel/TextLabel)
 	UIGradient     = "#6496F5", -- blue (same as ImageLabel/TextLabel)
-	Part           = "#B8DFFF", -- super light blue
+	Part           = "#F0913C", -- orange
 	Attachment     = "#6496F5", -- blue
-	Weld           = "#86D9FF", -- light blue
-	Model          = "#D08BE0", -- pinkish-purple
-	Folder         = "#E6C763", -- folder yellow
+	Weld           = "#8A8F98", -- dark-ish grey
+	Model          = "#ec9eff", -- pinkish-purple
+	Folder         = "#fadc7f", -- folder yellow
+	StarterPlayerScripts = "#fadc7f", -- folder yellow
 }
 
 -- Any mechanical constraint class (HingeConstraint, SpringConstraint, ...).
-local CONSTRAINT_COLOR = "#8A8F98" -- dark-ish grey
+local CONSTRAINT_COLOR = "#fff710" -- yellow
 
 -- Resolve the (hex) color for a class name, or nil for the default.
 local function classColor(cn)
@@ -193,7 +205,7 @@ local function nodeLabels(inst)
 	end
 	local cn = safeClass(inst)
 	local plainFull = nameStr .. " (" .. cn .. ")"
-	local shown = (abbrevMode and CLASS_ABBREV[cn]) or cn
+	local shown = (abbrevMode and classAbbrev(cn)) or cn
 	local classTxt = "(" .. escapeRich(shown) .. ")"
 	local hex = classColor(cn)
 	if hex then
@@ -378,7 +390,7 @@ local function collectAbbrevKeys(groupList)
 		for _, e in ipairs(g.entries) do
 			if not isService(e.inst) then
 				local cn = safeClass(e.inst)
-				local ab = CLASS_ABBREV[cn]
+				local ab = classAbbrev(cn)
 				if ab and not seen[cn] then
 					seen[cn] = ab
 					table.insert(order, cn)
@@ -754,6 +766,15 @@ do
 	pad.PaddingBottom = UDim.new(0, 12)
 	pad.Parent = body
 end
+
+-- Clicking empty background (not on a node row) clears the Explorer selection,
+-- which also clears the plugin highlight via the SelectionChanged mirror.
+body.Active = true
+body.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		pcall(function() Selection:Set({}) end)
+	end
+end)
 
 -- Key panel (bottom, only when abbreviation mode is on)
 local KEY_PANEL_H = 104
