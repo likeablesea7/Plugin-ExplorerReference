@@ -79,6 +79,7 @@ local CLASS_ABBREV = {
 -- of a node's label. Anything not listed keeps the default text color.
 local CLASS_COLOR = {
 	ScrollingFrame = "#8FE6A8", -- light green
+	TextBox        = "#8FE6A8", -- light green (same as ScrollingFrame)
 	TextButton     = "#45C46A", -- green
 	ImageButton    = "#45C46A", -- green
 	Frame          = "#F0913C", -- orange
