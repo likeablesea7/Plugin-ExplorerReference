@@ -5,7 +5,6 @@ end
 local Selection = game:GetService("Selection")
 local HttpService = game:GetService("HttpService")
 local TextService = game:GetService("TextService")
-local UserInputService = game:GetService("UserInputService")
 
 --============================================================
 -- Config / Theme
@@ -32,11 +31,13 @@ local THEME = {
 	textDim  = Color3.fromRGB(140, 140, 140),
 	header   = Color3.fromRGB(96, 160, 255),
 	service  = Color3.fromRGB(120, 200, 140),
-	rowSel   = Color3.fromRGB(38, 79, 120),
-	rowLatest = Color3.fromRGB(52, 104, 156), -- brighter: the primary (latest) selected node
-	rowHover = Color3.fromRGB(45, 45, 48),
-	border   = Color3.fromRGB(60, 60, 62),
-	guide    = Color3.fromRGB(50, 50, 56), -- Mark vertical guide lines
+	rowSel      = Color3.fromRGB(38, 79, 120),
+	rowLatest   = Color3.fromRGB(52, 104, 156), -- brighter: latest selected node
+	rowHover    = Color3.fromRGB(45, 45, 48),
+	border      = Color3.fromRGB(60, 60, 62),
+	guide       = Color3.fromRGB(50, 50, 56), -- Mark vertical guide lines
+	addBtn      = Color3.fromRGB(52, 130, 72), -- "+ Add Selection" stands out
+	addBtnHover = Color3.fromRGB(64, 150, 86),
 }
 
 -- Horizontal offset (px, within a row) for a guide line at a given child depth.
@@ -97,23 +98,15 @@ local activeIndex = 1
 local multiSelect = false
 local abbrevMode = false
 
--- Multi-selection within the plugin (mirrors Studio's Explorer selection).
-local selection = {} -- ordered list of selected Instances
+-- Selection shown in the plugin, mirrored from Studio's Explorer selection.
+local selection = {} -- ordered list of selected Instances (that are in the group)
 local selectionSet = {} -- [Instance] = true
-local latestInst = nil -- most recently clicked selected node (single-target actions use this)
-local anchorInst = nil -- range-select (Shift) anchor
-local applyingSelection = false -- guard against Studio<->plugin selection feedback loops
-
--- Undo / redo (snapshots of group state)
-local undoStack = {}
-local redoStack = {}
-local UNDO_LIMIT = 100
+local latestInst = nil -- last selected; single-target actions use this
 
 -- forward declarations
 local refreshAll, refreshView, refreshTabs, refreshNameBox, save
 local paintMulti, paintAbbrev, paintOverwrite, paintPad, paintMark
-local applyHighlight, syncSelectionToStudio, pushUndo
-local applyLayout
+local applyLayout, applyHighlight
 
 --============================================================
 -- Safe accessors
@@ -202,7 +195,7 @@ local function entryFor(group, inst)
 end
 
 local function addInstanceChain(group, inst)
-	if not isValid(inst) or inst == game then return 0 end
+	if not isValid(inst) or inst == game then return end
 	local chain = {}
 	local n = inst
 	while n and n ~= game do
@@ -210,17 +203,14 @@ local function addInstanceChain(group, inst)
 		if safeParent(n) == game then break end
 		n = safeParent(n)
 	end
-	local added = 0
 	for _, node in ipairs(chain) do
 		if not group.byInst[node] then
 			local e = { inst = node, order = group.counter, detail = nil }
 			group.counter += 1
 			table.insert(group.entries, e)
 			group.byInst[node] = e
-			added += 1
 		end
 	end
-	return added
 end
 
 local function pruneStale(group)
@@ -520,63 +510,6 @@ save = function()
 	end)
 end
 
---============================================================
--- Undo / redo (snapshots of group state, preserving live Instance refs)
---============================================================
-
-local function cloneGroups(src)
-	local out = {}
-	for _, g in ipairs(src) do
-		local ng = { name = g.name, counter = g.counter, entries = {}, byInst = {} }
-		for _, e in ipairs(g.entries) do
-			local ne = { inst = e.inst, order = e.order, detail = e.detail, padded = e.padded, marked = e.marked }
-			table.insert(ng.entries, ne)
-			ng.byInst[e.inst] = ne
-		end
-		table.insert(out, ng)
-	end
-	return out
-end
-
-local function snapshotState()
-	return { groups = cloneGroups(groups), active = activeIndex }
-end
-
-local function restoreState(snap)
-	groups = cloneGroups(snap.groups)
-	activeIndex = math.clamp(snap.active or 1, 1, math.max(1, #groups))
-	selection = {}
-	selectionSet = {}
-	latestInst = nil
-	anchorInst = nil
-end
-
-local function commitUndo(snap)
-	table.insert(undoStack, snap)
-	if #undoStack > UNDO_LIMIT then table.remove(undoStack, 1) end
-	redoStack = {}
-end
-
-pushUndo = function()
-	commitUndo(snapshotState())
-end
-
-local function undo()
-	if #undoStack == 0 then return end
-	table.insert(redoStack, snapshotState())
-	restoreState(table.remove(undoStack))
-	save()
-	refreshAll()
-end
-
-local function redo()
-	if #redoStack == 0 then return end
-	table.insert(undoStack, snapshotState())
-	restoreState(table.remove(redoStack))
-	save()
-	refreshAll()
-end
-
 local function newGroup(silent)
 	local g = { name = "Group " .. (#groups + 1), entries = {}, byInst = {}, counter = 0 }
 	table.insert(groups, g)
@@ -678,10 +611,13 @@ local function createBtnVisual(parent, text)
 	return b
 end
 
-local function makeButton(parent, text, cb)
+local function makeButton(parent, text, cb, bgColor, hoverColor)
 	local b = createBtnVisual(parent, text)
-	b.MouseEnter:Connect(function() b.BackgroundColor3 = THEME.btnHover end)
-	b.MouseLeave:Connect(function() b.BackgroundColor3 = THEME.btn end)
+	local base = bgColor or THEME.btn
+	local hover = hoverColor or THEME.btnHover
+	b.BackgroundColor3 = base
+	b.MouseEnter:Connect(function() b.BackgroundColor3 = hover end)
+	b.MouseLeave:Connect(function() b.BackgroundColor3 = base end)
 	b.MouseButton1Click:Connect(function()
 		local ok, err = pcall(cb)
 		if not ok then warn("[ExplorerReference] " .. tostring(err)) end
@@ -889,7 +825,7 @@ copyClose.Size = UDim2.new(0, 0, 0, 22)
 copyClose.ZIndex = 51
 copyClose.MouseButton1Click:Connect(function() copyOverlay.Visible = false end)
 
--- Scroll container (clips text to below the top bar; shows scrollbars).
+-- Scroll container: clips text below the top bar and shows scrollbars.
 local copyScroll = Instance.new("ScrollingFrame")
 copyScroll.BackgroundColor3 = THEME.bg
 copyScroll.BorderColor3 = THEME.border
@@ -1026,6 +962,22 @@ owCancel.ZIndex = 51
 
 local bodyRows = {}
 
+-- Recompute the plugin selection from Studio's Explorer selection (only nodes
+-- that are actually in this group). The last one is treated as "latest".
+local function computeSelectionFromStudio(group)
+	selection = {}
+	for _, inst in ipairs(Selection:Get()) do
+		if group.byInst[inst] then
+			table.insert(selection, inst)
+		end
+	end
+	selectionSet = {}
+	for _, inst in ipairs(selection) do
+		selectionSet[inst] = true
+	end
+	latestInst = selection[#selection] -- may be nil
+end
+
 -- Paint every row's background from the current selection (latest = brighter).
 applyHighlight = function()
 	for _, row in ipairs(bodyRows) do
@@ -1042,102 +994,6 @@ applyHighlight = function()
 	if paintOverwrite then paintOverwrite() end
 	if paintPad then paintPad() end
 	if paintMark then paintMark() end
-end
-
--- Mirror the plugin selection into Studio's Explorer (guarded against feedback).
-syncSelectionToStudio = function()
-	applyingSelection = true
-	pcall(function() Selection:Set(selection) end)
-	applyingSelection = false
-end
-
-local function rebuildSelectionSet()
-	selectionSet = {}
-	for _, inst in ipairs(selection) do
-		selectionSet[inst] = true
-	end
-end
-
--- Compare two instance lists as sets (order-independent).
-local function sameSelection(a, b)
-	if #a ~= #b then return false end
-	local set = {}
-	for _, x in ipairs(a) do set[x] = true end
-	for _, x in ipairs(b) do
-		if not set[x] then return false end
-	end
-	return true
-end
-
--- Ordered list of currently displayed node instances (for Shift range select).
-local function orderedNodeInsts()
-	local list = {}
-	for _, row in ipairs(bodyRows) do
-		if row.inst then table.insert(list, row.inst) end
-	end
-	return list
-end
-
-local function setSingleSelection(inst)
-	selection = { inst }
-	selectionSet = { [inst] = true }
-	latestInst = inst
-	anchorInst = inst
-end
-
--- Handle a click on a node row, honoring Ctrl (toggle) and Shift (range).
-local function onNodeClicked(inst)
-	local ctrl = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
-		or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
-	local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
-		or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
-
-	if shift and anchorInst then
-		local ordered = orderedNodeInsts()
-		local ia, ib
-		for i, n in ipairs(ordered) do
-			if n == anchorInst then ia = i end
-			if n == inst then ib = i end
-		end
-		if ia and ib then
-			if ia > ib then ia, ib = ib, ia end
-			for i = ia, ib do
-				local n = ordered[i]
-				if not selectionSet[n] then
-					table.insert(selection, n)
-					selectionSet[n] = true
-				end
-			end
-			latestInst = inst
-		else
-			setSingleSelection(inst)
-		end
-	elseif ctrl then
-		if selectionSet[inst] then
-			for i = #selection, 1, -1 do
-				if selection[i] == inst then table.remove(selection, i) end
-			end
-			selectionSet[inst] = nil
-			latestInst = selection[#selection] -- may be nil
-		else
-			table.insert(selection, inst)
-			selectionSet[inst] = true
-			latestInst = inst
-		end
-		anchorInst = inst
-	else
-		setSingleSelection(inst)
-	end
-
-	applyHighlight()
-	syncSelectionToStudio()
-end
-
-local function clearSelection()
-	selection = {}
-	selectionSet = {}
-	latestInst = nil
-	anchorInst = nil
 end
 
 local function clearBody()
@@ -1237,7 +1093,9 @@ local function createRow(item, order)
 			end
 		end)
 		btn.MouseButton1Click:Connect(function()
-			onNodeClicked(inst)
+			-- clicking selects this node in the Explorer; the SelectionChanged
+			-- handler mirrors it back into the plugin highlight
+			pcall(function() Selection:Set({ inst }) end)
 		end)
 	end
 
@@ -1251,20 +1109,11 @@ refreshView = function()
 	local g = activeGroup()
 	if not g then return end
 	pruneStale(g)
-	-- drop selected nodes that are no longer in this group
-	local keptSel = {}
-	for _, inst in ipairs(selection) do
-		if g.byInst[inst] then table.insert(keptSel, inst) end
-	end
-	selection = keptSel
-	rebuildSelectionSet()
-	if latestInst and not selectionSet[latestInst] then latestInst = selection[#selection] end
-	if anchorInst and not selectionSet[anchorInst] then anchorInst = latestInst end
-
 	local items = buildItems(g)
 	for i, item in ipairs(items) do
 		createRow(item, i)
 	end
+	computeSelectionFromStudio(g) -- highlight nodes selected in the Explorer
 	applyHighlight()
 	-- key panel
 	if abbrevMode then
@@ -1285,9 +1134,8 @@ local function makeTab(parent, group, index, isActive)
 	b.MouseLeave:Connect(function() b.BackgroundColor3 = base end)
 	b.MouseButton1Click:Connect(function()
 		activeIndex = index
-		clearSelection()
 		save()
-		refreshAll()
+		refreshAll() -- selection re-derives from the Explorer for the new group
 	end)
 	return b
 end
@@ -1351,7 +1199,6 @@ end
 nameBox.FocusLost:Connect(function()
 	local g = activeGroup()
 	if g and nameBox.Text ~= "" and nameBox.Text ~= g.name then
-		pushUndo()
 		g.name = nameBox.Text
 		save()
 		refreshTabs()
@@ -1362,7 +1209,6 @@ nameBox.FocusLost:Connect(function()
 end)
 
 delGroupBtn.MouseButton1Click:Connect(function()
-	pushUndo()
 	if #groups <= 1 then
 		-- clearing the last group = fresh slate
 		groups[1] = { name = "Group 1", entries = {}, byInst = {}, counter = 0 }
@@ -1371,7 +1217,6 @@ delGroupBtn.MouseButton1Click:Connect(function()
 		table.remove(groups, activeIndex)
 		if activeIndex > #groups then activeIndex = #groups end
 	end
-	clearSelection()
 	save()
 	refreshAll()
 end)
@@ -1385,15 +1230,10 @@ makeButton(actionRow, "+ Add Selection", function()
 		warn("[ExplorerReference] Select something in the Explorer first.")
 		return
 	end
-	local pre = snapshotState()
-	local added = 0
-	for _, inst in ipairs(sel) do added += addInstanceChain(g, inst) end
-	if added > 0 then
-		commitUndo(pre)
-		save()
-		refreshView()
-	end
-end)
+	for _, inst in ipairs(sel) do addInstanceChain(g, inst) end
+	save()
+	refreshView() -- highlights the added nodes (their elements are still selected)
+end, THEME.addBtn, THEME.addBtnHover)
 
 do
 	local _, paint = makeToggle(actionRow, "Multi-Select", function() return multiSelect end, function()
@@ -1402,14 +1242,9 @@ do
 			-- immediately capture whatever's already selected
 			local g = activeGroup()
 			if g then
-				local pre = snapshotState()
-				local added = 0
-				for _, inst in ipairs(Selection:Get()) do added += addInstanceChain(g, inst) end
-				if added > 0 then
-					commitUndo(pre)
-					save()
-					refreshView()
-				end
+				for _, inst in ipairs(Selection:Get()) do addInstanceChain(g, inst) end
+				save()
+				refreshView()
 			end
 		end
 	end)
@@ -1443,7 +1278,7 @@ do
 	end, function()
 		local g = activeGroup()
 		if not g or not latestInst then
-			warn("[ExplorerReference] Click a node in the list first, then press Overwrite.")
+			warn("[ExplorerReference] Select a node (in the Explorer) first, then press Overwrite.")
 			return
 		end
 		local e = entryFor(g, latestInst)
@@ -1463,16 +1298,14 @@ end
 makeButton(actionRow2, "Remove", function()
 	local g = activeGroup()
 	if not g or #selection == 0 then
-		warn("[ExplorerReference] Select node(s) in the list first.")
+		warn("[ExplorerReference] Select node(s) in the Explorer first.")
 		return
 	end
-	pushUndo()
 	local targets = {}
 	for _, inst in ipairs(selection) do table.insert(targets, inst) end
 	for _, inst in ipairs(targets) do
 		if g.byInst[inst] then deleteSubtree(g, inst) end
 	end
-	clearSelection()
 	save()
 	refreshView()
 end)
@@ -1480,7 +1313,6 @@ end)
 makeButton(actionRow2, "Up", function()
 	local g = activeGroup()
 	if not g or not latestInst then return end
-	pushUndo()
 	moveNode(g, latestInst, -1)
 	save()
 	refreshView()
@@ -1489,7 +1321,6 @@ end)
 makeButton(actionRow2, "Down", function()
 	local g = activeGroup()
 	if not g or not latestInst then return end
-	pushUndo()
 	moveNode(g, latestInst, 1)
 	save()
 	refreshView()
@@ -1503,12 +1334,11 @@ do
 	end, function()
 		local g = activeGroup()
 		if not g or not latestInst then
-			warn("[ExplorerReference] Click a node in the list first, then press Pad.")
+			warn("[ExplorerReference] Select a node (in the Explorer) first, then press Pad.")
 			return
 		end
 		local e = entryFor(g, latestInst)
 		if not e then return end
-		pushUndo()
 		e.padded = not e.padded
 		save()
 		refreshView()
@@ -1524,12 +1354,11 @@ do
 	end, function()
 		local g = activeGroup()
 		if not g or not latestInst then
-			warn("[ExplorerReference] Click a parent node in the list first, then press Mark.")
+			warn("[ExplorerReference] Select a parent node (in the Explorer) first, then press Mark.")
 			return
 		end
 		local e = entryFor(g, latestInst)
 		if not e then return end
-		pushUndo()
 		e.marked = not e.marked
 		save()
 		refreshView()
@@ -1552,13 +1381,9 @@ local function applyOverwrite()
 	local e = owTarget and g and entryFor(g, owTarget)
 	if e then
 		local txt = owBox.Text
-		local newDetail = (txt ~= "") and txt or nil
-		if newDetail ~= e.detail then
-			pushUndo()
-			e.detail = newDetail
-			save()
-			refreshView()
-		end
+		e.detail = (txt ~= "") and txt or nil
+		save()
+		refreshView()
 	end
 	owOverlay.Visible = false
 	if paintOverwrite then paintOverwrite() end
@@ -1571,8 +1396,7 @@ end)
 owRemove.MouseButton1Click:Connect(function()
 	local g = activeGroup()
 	local e = owTarget and g and entryFor(g, owTarget)
-	if e and e.detail ~= nil then
-		pushUndo()
+	if e then
 		e.detail = nil
 		save()
 		refreshView()
@@ -1603,56 +1427,24 @@ end)
 
 Selection.SelectionChanged:Connect(function()
 	if not widget.Enabled then return end
+	local g = activeGroup()
+	if not g then return end
 
-	-- Multi-Select: auto-add whatever is selected in the Explorer.
-	if multiSelect and not applyingSelection then
-		local g = activeGroup()
-		if g then
-			local pre = snapshotState()
-			local added = 0
-			for _, inst in ipairs(Selection:Get()) do added += addInstanceChain(g, inst) end
-			if added > 0 then
-				commitUndo(pre)
-				save()
-				refreshView()
-			end
+	-- Multi-Select: auto-add whatever is selected in the Explorer, then rebuild
+	-- (which re-derives the highlight, so newly added nodes show as selected).
+	if multiSelect then
+		local before = #g.entries
+		for _, inst in ipairs(Selection:Get()) do addInstanceChain(g, inst) end
+		if #g.entries ~= before then
+			save()
+			refreshView()
+			return
 		end
 	end
 
-	-- Mirror the Explorer selection into the plugin (nodes present in the group),
-	-- unless this change was caused by the plugin itself.
-	if applyingSelection then return end
-	local g = activeGroup()
-	if not g then return end
-	local newSel = {}
-	for _, inst in ipairs(Selection:Get()) do
-		if g.byInst[inst] then table.insert(newSel, inst) end
-	end
-	-- ignore an echo of our own selection so latest/anchor aren't disturbed
-	if sameSelection(newSel, selection) then return end
-	selection = newSel
-	rebuildSelectionSet()
-	latestInst = selection[#selection]
-	anchorInst = latestInst
+	-- Otherwise just re-mirror the Explorer selection into the highlight.
+	computeSelectionFromStudio(g)
 	applyHighlight()
-end)
-
--- Undo / redo hotkeys, scoped to when the plugin window is focused so they
--- don't fight Studio's global Ctrl+Z out in the viewport.
-local widgetFocused = false
-widget.WindowFocused:Connect(function() widgetFocused = true end)
-widget.WindowFocusReleased:Connect(function() widgetFocused = false end)
-
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-	if gameProcessed then return end -- e.g. typing in a TextBox
-	if not widget.Enabled or not widgetFocused then return end
-	if input.KeyCode ~= Enum.KeyCode.Z then return end
-	local ctrl = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
-		or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
-	if not ctrl then return end
-	local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
-		or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
-	if shift then redo() else undo() end
 end)
 
 --============================================================
